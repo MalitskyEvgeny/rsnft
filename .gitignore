@@ -1,0 +1,12 @@
+rsnft/.venv/
+rsnft/__pycache__/
+rsnft/data1/
+rsnft/data2/
+rsnft/help.pdf
+rsnft/Постановка_задачи_2026.pdf
+rsnft/Данные_для_прямой_задачи.7z
+Approach_to_basin_modelin.html
+Basin_modeling_example.py
+Break_lithology_approaches_impl.py
+break_lithology_approaches.zip
+break_lithology_approaches/
