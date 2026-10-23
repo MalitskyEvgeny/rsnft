@@ -11,6 +11,7 @@ using JSON
 using Luxor
 using NPZ
 using Printf
+using Colors
 
 const PALETTE = Float64[
     0 0 4; 31 12 72; 85 15 109; 136 34 106;
@@ -33,7 +34,7 @@ end
 "Цвет для значения: линейная интерполяция по палитре, не-конечные значения — серый (245)."
 function colour_rgb(v::Real, low::Real, high::Real)
     if !isfinite(v)
-        return RGB{N0f8}(245 / 255, 245 / 255, 245 / 255)
+        return RGB{Float64}(245 / 255, 245 / 255, 245 / 255)
     end
     scaled = clamp((v - low) / max(high - low, 1.0e-12), 0.0, 1.0)
     position = scaled * (size(PALETTE, 1) - 1)
@@ -42,15 +43,15 @@ function colour_rgb(v::Real, low::Real, high::Real)
     weight = position - left
     c = ntuple(k -> clamp(floor(Int, PALETTE[left+1, k] * (1.0 - weight) +
                                     PALETTE[right+1, k] * weight), 0, 255) / 255, 3)
-    return RGB{N0f8}(c[1], c[2], c[3])
+    return RGB{Float64}(c[1], c[2], c[3])
 end
 
 colour_at(v, low, high) = colour_rgb(v, low, high)
 
 "Матрица цветов размера h×w, масштабирование «ближайший сосед» как в PIL (NEAREST)."
-function nearest_resize(colours::Matrix{RGB{N0f8}}, w::Int, h::Int)
+function nearest_resize(colours::Matrix{RGB{Float64}}, w::Int, h::Int)
     nz, nx = size(colours)
-    img = Matrix{RGB{N0f8}}(undef, h, w)
+    img = Matrix{RGB{Float64}}(undef, h, w)
     for jd in 1:h, id in 1:w
         js = min(nz, floor(Int, (jd - 0.5) * nz / h) + 1)
         is = min(nx, floor(Int, (id - 0.5) * nx / w) + 1)
@@ -127,7 +128,7 @@ function main_results(argv = ARGS)
 
     bar_x = left + width + 18
     gradient = collect(range(high, low; length = height))
-    bar = Matrix{RGB{N0f8}}(undef, height, 28)
+    bar = Matrix{RGB{Float64}}(undef, height, 28)
     for j in 1:height
         bar[j, :] .= colour_rgb(gradient[j], low, high)
     end
