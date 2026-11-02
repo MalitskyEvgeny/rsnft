@@ -155,3 +155,28 @@ function invert_ensemble(obj::Objective; ensemble::Int = 4, de_budget::Int = 400
     end
     return sort!(results; by = r -> r.J)
 end
+
+"Загрузка данных и параметров на воркере (вызывается remotecall_fetch)."
+function worker_load!(data_dir::AbstractString, wells::WellSet, epochs::Vector{Tuple{Float64,Float64}},
+                      n_nodes::Int, mid_x::Float64, nx::Int, nz::Int)
+    global INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT
+    INV_DATA = load_dataset_derived(data_dir, Workbook())
+    INV_LAYOUT = make_q_layout(INV_DATA; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x)
+    INV_WELLS = wells
+    INV_CFG = SolverConfig(nx = nx, nz = nz)
+    return myid()
+end
+
+"Полная инициализация воркера: данные + Objective (один remotecall)."
+function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{Tuple{Float64,Float64}},
+                      n_nodes::Int, mid_x::Float64, nx::Int, nz::Int;
+                      reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "")
+    global INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT
+    INV_DATA = load_dataset_derived(data_dir, Workbook())
+    INV_LAYOUT = make_q_layout(INV_DATA; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x)
+    INV_WELLS = wells
+    INV_CFG = SolverConfig(nx = nx, nz = nz)
+    worker_setup(INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT;
+                 reg = reg, weight_ro = weight_ro, cache_dir = cache_dir)
+    return myid()
+end

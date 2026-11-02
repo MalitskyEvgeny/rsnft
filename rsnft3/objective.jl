@@ -112,9 +112,13 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
         push!(ro_targets, RoTarget(p.x, le[1], le[2], p.value, p.sigma))
     end
     cache_path = isempty(cache_dir) ? "" : joinpath(cache_dir, "j_cache.json")
-    cache = Dict{String,Float64}()
+    cache = Dict{String,Vector{Float64}}()
     if !isempty(cache_path) && isfile(cache_path)
-        merge!(cache, JSON.parsefile(cache_path))
+        for (k, v) in JSON.parsefile(cache_path)
+            v isa AbstractVector ?
+                cache[k] = Float64[x === nothing ? NaN : Float64(x) for x in v] :
+                cache[k] = [Float64(v), NaN, NaN, NaN]   # старый формат (скаляр J)
+        end
     end
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
                      t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0))
@@ -129,11 +133,13 @@ n_targets(obj::Objective, kind::Symbol) =
 cache_key(θ::AbstractVector{<:Real}) =
     bytes2hex(sha256(join(string.(round.(Float64.(θ); digits = 10)), ",")))
 
+json_safe(v::Vector{Float64}) = Any[isfinite(x) ? x : nothing for x in v]
+
 function cache_save(obj::Objective)
     isempty(obj.cache_path) && return
     mkpath(dirname(obj.cache_path))
     open(obj.cache_path, "w") do f
-        JSON.print(f, obj.cache)
+        JSON.print(f, OrderedDict(k => json_safe(v) for (k, v) in obj.cache))
     end
 end
 
