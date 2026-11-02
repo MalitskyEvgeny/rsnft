@@ -230,10 +230,13 @@ const REQUIRED = (
     "Depth.xlsx",
     "Lithology.xlsx",
     "Porosity.xlsx",
-    "Heat_Flow_Basal.xlsx",
     "Tsurf.xlsx",
     "lithotype_properties.xlsx",
 )
+
+# Heat_Flow_Basal.xlsx опционален: в постановке обратной задачи 2026 q_basal(x,t) —
+# неизвестный, он инжектируется в памяти (parameterized_data.jl), а не читается из файла.
+const OPTIONAL = ("Heat_Flow_Basal.xlsx",)
 
 struct BasinDataset
     data_dir::String
@@ -262,7 +265,8 @@ function read_all(data_dir::AbstractString)
     depth    = read_workbook(joinpath(data_dir, "Depth.xlsx"))
     lith     = read_workbook(joinpath(data_dir, "Lithology.xlsx"))
     porosity = read_workbook(joinpath(data_dir, "Porosity.xlsx"))
-    heat     = read_workbook(joinpath(data_dir, "Heat_Flow_Basal.xlsx"))
+    heat_path = joinpath(data_dir, "Heat_Flow_Basal.xlsx")
+    heat     = isfile(heat_path) ? read_workbook(heat_path) : Workbook()
     tsurf    = read_workbook(joinpath(data_dir, "Tsurf.xlsx"))
 
     prop = DataFrame(XLSX.readtable(joinpath(data_dir, "lithotype_properties.xlsx"), 1))
@@ -548,7 +552,7 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
 
         solution, linear_iterations, linear_residual = pcg_solve(
             diagonal, pair_p, pair_q, pair_g, rhs, trial[active];
-            tolerance = 1.0e-8, max_iterations = max(500, 4 * config.nx),
+            tolerance = 1.0e-8, max_iterations = max(2000, 8 * config.nx * config.nz),
         )
         updated = fill(NaN, nz, nx)
         updated[active] = solution
