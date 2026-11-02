@@ -131,6 +131,44 @@ function theta_constant(layout::ThetaLayout, epoch_q::Vector{Float64})
 end
 
 "Разности θ по соседним эпохам и соседним X-узлам (для регуляризации B3)."
+# ----------------------------------------------------------------------------
+# make_param_data (B2): BasinDataset с инжектированным θ-heat
+# ----------------------------------------------------------------------------
+
+"Возраст принадлежит эпохе [старая, молодая]; вне сетки эпох — ближайшая по середине."
+function epoch_index_of(layout::ThetaLayout, age::Float64)
+    for (ie, (a_old, a_young)) in enumerate(layout.epochs)
+        age <= a_old && age >= a_young && return ie
+    end
+    mids = [(e[1] + e[2]) / 2 for e in layout.epochs]
+    return argmin(abs.(mids .- age))
+end
+
+"""
+    make_param_data(data, layout, θ) -> BasinDataset
+
+Копия датасета с синтетическим Workbook heat: на каждый возраст — Record
+с value в X-узлах layout (константа по эпохе); boundary_value решателя
+линейно интерполирует по x → ступенчатая по эпохам q(x, t). Tsurf,
+геометрия, свойства — из исходных данных без изменений.
+"""
+function make_param_data(data::BasinDataset, layout::ThetaLayout, θ::AbstractVector{<:Real})
+    length(θ) == length(layout) ||
+        throw(DimensionMismatch("theta has $(length(θ)) components, layout expects $(length(layout))"))
+    nn = length(layout.nodes_x)
+    ages = ages_of(data)
+    d = Dict{Float64,Record}()
+    for age in ages
+        ie = epoch_index_of(layout, age)
+        q = [Float64(θ[(ie-1)*nn + ix]) for ix in 1:nn]
+        d[age] = Record(layout.nodes_x, fill(NaN, nn), fill(NaN, nn), q)
+    end
+    heat = Workbook("Param" => d)
+    return BasinDataset(data.data_dir, "param-" * string(hash(round.(θ; digits = 10)))[1:8],
+                        data.depth, data.lith, data.porosity, heat,
+                        data.tsurf_data, data.properties, data.ages, data.bounds)
+end
+
 function theta_diffs(layout::ThetaLayout, θ::AbstractVector{<:Real})
     nn = length(layout.nodes_x)
     ne = length(layout.epochs)
