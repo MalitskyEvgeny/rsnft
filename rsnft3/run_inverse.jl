@@ -52,28 +52,6 @@ function parse_epochs(spec::AbstractString)
     return out
 end
 
-"Загрузка наблюдений: XLSX (kind по имени файла) или JSON (twin)."
-function load_wells_multi(spec::AbstractString, data; sigma_T, sigma_Ro)
-    points = WellPoint[]; excluded = WellPoint[]; excl_wells = String[]
-    for path in split(spec, ";")
-        path = strip(path)
-        isfile(path) || error("wells file not found: $path")
-        ws = endswith(path, ".json") ?
-             load_wells_json(path, data) :
-             load_wells_xlsx(path, data;
-                             kind = occursin("vitrinite", lowercase(basename(path))) ? :Ro : :T,
-                             sigma_T = sigma_T, sigma_Ro = sigma_Ro)
-        append!(points, ws.points); append!(excluded, ws.excluded)
-        append!(excl_wells, ws.excluded_wells)
-    end
-    return WellSet(points, excluded, excl_wells)
-end
-
-
-nan2null(x) = x isa AbstractFloat && isnan(x) ? nothing : x
-nan2null(x::AbstractArray) = [nan2null(v) for v in x]
-nan2null(x::AbstractDict) = OrderedDict(k => nan2null(v) for (k, v) in x)
-
 function main()
     args = parse_cli()
     nx, nz = parse.(Int, split(args["grid"], ","))
