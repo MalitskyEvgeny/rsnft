@@ -47,7 +47,7 @@ struct Objective
     t_targets::Vector{TTarget}
     ro_targets::Vector{RoTarget}
     n_dropped_T::Int                       # точки в неактивных ячейках сетки
-    cache::Dict{String,Float64}
+    cache::Dict{String,Vector{Float64}}    # key -> [J, J_T, J_Ro, J_reg]
     cache_path::String                     # "" — только в памяти
     evals::Base.RefValue{Int}
 end
@@ -141,8 +141,9 @@ end
 function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     key = cache_key(θ)
     if haskey(obj.cache, key)
-        return obj.cache[key], (J_T = NaN, J_Ro = NaN, J_reg = NaN, cached = true,
-                                evals = obj.evals[], t_seconds = 0.0)
+        v = obj.cache[key]
+        return v[1], (J_T = v[2], J_Ro = v[3], J_reg = v[4], cached = true,
+                      evals = obj.evals[], t_seconds = 0.0)
     end
     t0 = time()
     obj.evals[] += 1
@@ -167,7 +168,7 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     J_reg = obj.reg * (sum(abs2, d_node) + sum(abs2, d_epoch))
 
     J = J_T + obj.weight_ro * J_Ro + J_reg
-    obj.cache[key] = J
+    obj.cache[key] = [J, J_T, J_Ro, J_reg]
     cache_save(obj)
     return J, (J_T = J_T, J_Ro = J_Ro, J_reg = J_reg, cached = false,
                evals = obj.evals[], t_seconds = time() - t0)
