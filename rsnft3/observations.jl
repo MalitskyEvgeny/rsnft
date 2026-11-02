@@ -56,7 +56,9 @@ function build_wellset(raw::Vector{WellPoint}, data::BasinDataset)
     by_well = Dict{String,Vector{WellPoint}}()
     for p in raw
         isfinite(p.x) && isfinite(p.z) && isfinite(p.value) || continue
-        p.sigma > 0 || error("sigma must be > 0 for well $(p.well) ($(p.kind))")
+        p.sigma >= 0 || error("sigma must be >= 0 for well $(p.well) ($(p.kind))")
+        # sigma == 0 допустим только для точного twin (E1); в J такой вклад
+        # считается без нормировки (objective.jl)
         push!(get!(by_well, p.well, WellPoint[]), p)
     end
     excluded_wells = String[]

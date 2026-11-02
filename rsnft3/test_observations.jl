@@ -50,12 +50,13 @@ check("layer_eta_at: point inside its layer, eta in [0,1]", ok_layers)
 check("layer_eta_at: outside point -> nothing", layer_eta_at(d, -1000.0, 2000.0) === nothing)
 
 # --- 4. Валидация sigma ---
-raw_bad = [WellPoint("W", 10000.0, 2000.0, :T, 50.0, 0.0)]
+raw_zero = build_wellset([WellPoint("W", 10000.0, 2000.0, :T, 50.0, 0.0)], d)
+check("sigma=0 allowed (exact twin)", length(raw_zero.points) == 1)
 try
-    build_wellset(raw_bad, d)
-    check("sigma=0 raises", false)
+    build_wellset([WellPoint("W", 10000.0, 2000.0, :T, 50.0, -1.0)], d)
+    check("negative sigma raises", false)
 catch
-    check("sigma=0 raises", true)
+    check("negative sigma raises", true)
 end
 
 # --- 5. JSON-загрузчик (формат make_twin) ---

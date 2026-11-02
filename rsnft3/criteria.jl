@@ -28,7 +28,7 @@ struct CriteriaReport
 end
 
 frac_within(res::Vector{Float64}, sigma::Float64, k::Real) =
-    isempty(res) ? NaN : count(r -> abs(r) <= k * sigma, res) / length(res)
+    (isempty(res) || sigma <= 0) ? NaN : count(r -> abs(r) <= k * sigma, res) / length(res)
 
 rmse(res::Vector{Float64}) = isempty(res) ? NaN : sqrt(sum(abs2, res) / length(res))
 

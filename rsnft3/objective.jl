@@ -161,13 +161,15 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     J_T = 0.0
     for t in obj.t_targets
         v = bilinear_sample(xg, zg, temp0, t.x, t.z)
-        J_T += isfinite(v) ? ((v - t.value) / t.sigma)^2 : 1.0e6
+        w = t.sigma > 0 ? 1.0 / t.sigma^2 : 1.0
+        J_T += isfinite(v) ? w * (v - t.value)^2 : 1.0e6
     end
 
     J_Ro = 0.0
     for t in obj.ro_targets
         rc = particle_ro(result, obj.data, t.x, t.layer, t.eta)
-        J_Ro += isfinite(rc) ? ((rc - t.value) / t.sigma)^2 : 1.0e6
+        w = t.sigma > 0 ? 1.0 / t.sigma^2 : 1.0
+        J_Ro += isfinite(rc) ? w * (rc - t.value)^2 : 1.0e6
     end
 
     d_node, d_epoch = theta_diffs(obj.layout, θ)
