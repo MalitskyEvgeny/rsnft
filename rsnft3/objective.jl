@@ -1,0 +1,174 @@
+# B3: функционал J(θ) для инверсии q. Прямая задача + выборка наблюдений:
+# T(t=0) билинейно по (x, z), Ro — по частицам скважин (ro_kinetics).
+# J = Σ((T−T_obs)/σ_T)² + weight_ro·Σ((Ro−Ro_obs)/σ_Ro)² + reg·Σ(Δθ)².
+# Кэш θ→J: SHA-256(round(θ,10)), память + опциональный JSON-дамп.
+
+using SHA
+
+include(joinpath(@__DIR__, "parameterized_data.jl"))
+include(joinpath(@__DIR__, "ro_kinetics.jl"))
+include(joinpath(@__DIR__, "observations.jl"))
+
+"Билинейная выборка поля field (nz, nx) на сетке (xg, zg) в точке (x, z)."
+function bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
+                         x::Float64, z::Float64)
+    nx, nz = length(xg), length(zg)
+    ux = (x - xg[1]) / (xg[2] - xg[1])
+    uz = (z - zg[1]) / (zg[2] - zg[1])
+    i0 = clamp(floor(Int, ux) + 1, 1, nx); i1 = clamp(i0 + 1, 1, nx)
+    j0 = clamp(floor(Int, uz) + 1, 1, nz); j1 = clamp(j0 + 1, 1, nz)
+    tx = clamp(ux - (i0 - 1), 0.0, 1.0); tz = clamp(uz - (j0 - 1), 0.0, 1.0)
+    v00 = field[j0, i0]; v10 = field[j0, i1]; v01 = field[j1, i0]; v11 = field[j1, i1]
+    (isfinite(v00) && isfinite(v10) && isfinite(v01) && isfinite(v11)) || return NaN
+    return (1-tx)*(1-tz)*v00 + tx*(1-tz)*v10 + (1-tx)*tz*v01 + tx*tz*v11
+end
+
+struct TTarget
+    x::Float64
+    z::Float64
+    value::Float64
+    sigma::Float64
+end
+
+struct RoTarget
+    x::Float64
+    layer::String
+    eta::Float64
+    value::Float64
+    sigma::Float64
+end
+
+struct Objective
+    data::BasinDataset
+    cfg::SolverConfig
+    layout::ThetaLayout
+    reg::Float64
+    weight_ro::Float64
+    t_targets::Vector{TTarget}
+    ro_targets::Vector{RoTarget}
+    n_dropped_T::Int                       # точки в неактивных ячейках сетки
+    cache::Dict{String,Float64}
+    cache_path::String                     # "" — только в памяти
+    evals::Base.RefValue{Int}
+end
+
+"Маска активных ячеек (nz, nx): ячейка накрыта хотя бы одним слоем на age 0."
+function sediment_mask(data::BasinDataset, cfg::SolverConfig)
+    nx, nz = cfg.nx, cfg.nz
+    b = data.bounds
+    dx = (b[2] - b[1]) / nx; dz = (b[4] - b[3]) / nz
+    xg = [b[1] + (i - 0.5) * dx for i in 1:nx]
+    zg = [b[3] + (j - 0.5) * dz for j in 1:nz]
+    active = falses(nz, nx)
+    for (_, ser) in data.depth
+        haskey(ser, 0.0) || continue
+        rec = ser[0.0]
+        for i in 1:nx
+            (rec.x[1] > xg[i] || rec.x[end] < xg[i]) && continue
+            j = clamp(searchsortedlast(rec.x, xg[i]), 1, length(rec.x) - 1)
+            t = (xg[i] - rec.x[j]) / max(rec.x[j+1] - rec.x[j], 1e-9)
+            top = rec.top[j] + t * (rec.top[j+1] - rec.top[j])
+            bot = rec.bot[j] + t * (rec.bot[j+1] - rec.bot[j])
+            for k in 1:nz
+                (zg[k] >= top && zg[k] <= bot) && (active[k, i] = true)
+            end
+        end
+    end
+    return active, xg, zg
+end
+
+"""
+    make_objective(data, wells, cfg, layout; reg, weight_ro, cache_dir)
+        -> objective(θ) -> (J, info)
+
+data — датасет без heat (инжекция внутри objective); reg — λ_r регуляризации
+гладкости (соседние X-узлы и эпохи); cache_dir — каталог JSON-кэша θ→J
+(пусто — только память; у каждого воркера свой). T-точки, чей билинейный
+стенсил задевает неактивные ячейки сетки (тонкий клин осадков — артефакт
+разрешения, не ошибка данных), исключаются из J и считаются в n_dropped_T.
+"""
+function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, layout::ThetaLayout;
+                        reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "")
+    active, xg, zg = sediment_mask(data, cfg)
+    t_targets = TTarget[]
+    n_dropped = 0
+    stencil_ok(x, z) = begin
+        fx = (x - xg[1]) / (xg[2] - xg[1]) + 0.5
+        fz = (z - zg[1]) / (zg[2] - zg[1]) + 0.5
+        i0 = clamp(floor(Int, fx), 1, cfg.nx); i1 = clamp(i0 + 1, 1, cfg.nx)
+        j0 = clamp(floor(Int, fz), 1, cfg.nz); j1 = clamp(j0 + 1, 1, cfg.nz)
+        active[j0, i0] && active[j0, i1] && active[j1, i0] && active[j1, i1]
+    end
+    for p in wells.points
+        if p.kind === :T
+            stencil_ok(p.x, p.z) ? push!(t_targets, TTarget(p.x, p.z, p.value, p.sigma)) : (n_dropped += 1)
+        end
+    end
+    ro_targets = RoTarget[]
+    for p in wells.points
+        p.kind === :Ro || continue
+        le = layer_eta_at(data, p.x, p.z)
+        le === nothing && continue
+        push!(ro_targets, RoTarget(p.x, le[1], le[2], p.value, p.sigma))
+    end
+    cache_path = isempty(cache_dir) ? "" : joinpath(cache_dir, "j_cache.json")
+    cache = Dict{String,Float64}()
+    if !isempty(cache_path) && isfile(cache_path)
+        merge!(cache, JSON.parsefile(cache_path))
+    end
+    return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
+                     t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0))
+end
+
+n_targets(obj::Objective, kind::Symbol) =
+    kind === :T ? length(obj.t_targets) : length(obj.ro_targets)
+
+"Вызов objective(θ) -> (J, info); сам Objective хранит кэш, счётчики и мишени."
+(obj::Objective)(θ::AbstractVector{<:Real}) = evaluate(obj, θ)
+
+cache_key(θ::AbstractVector{<:Real}) =
+    bytes2hex(sha256(join(string.(round.(Float64.(θ); digits = 10)), ",")))
+
+function cache_save(obj::Objective)
+    isempty(obj.cache_path) && return
+    mkpath(dirname(obj.cache_path))
+    open(obj.cache_path, "w") do f
+        JSON.print(f, obj.cache)
+    end
+end
+
+"Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info)."
+function evaluate(obj::Objective, θ::AbstractVector{<:Real})
+    key = cache_key(θ)
+    if haskey(obj.cache, key)
+        return obj.cache[key], (J_T = NaN, J_Ro = NaN, J_reg = NaN, cached = true,
+                                evals = obj.evals[], t_seconds = 0.0)
+    end
+    t0 = time()
+    obj.evals[] += 1
+    pdata = make_param_data(obj.data, obj.layout, θ)
+    result = run_forward(pdata, obj.cfg)
+    xg, zg = result.x, result.z
+    temp0 = result.temperature_c[end, :, :]          # (nz, nx), t = 0
+
+    J_T = 0.0
+    for t in obj.t_targets
+        v = bilinear_sample(xg, zg, temp0, t.x, t.z)
+        J_T += isfinite(v) ? ((v - t.value) / t.sigma)^2 : 1.0e6
+    end
+
+    J_Ro = 0.0
+    for t in obj.ro_targets
+        rc = particle_ro(result, obj.data, t.x, t.layer, t.eta)
+        J_Ro += isfinite(rc) ? ((rc - t.value) / t.sigma)^2 : 1.0e6
+    end
+
+    d_node, d_epoch = theta_diffs(obj.layout, θ)
+    J_reg = obj.reg * (sum(abs2, d_node) + sum(abs2, d_epoch))
+
+    J = J_T + obj.weight_ro * J_Ro + J_reg
+    obj.cache[key] = J
+    cache_save(obj)
+    return J, (J_T = J_T, J_Ro = J_Ro, J_reg = J_reg, cached = false,
+               evals = obj.evals[], t_seconds = time() - t0)
+end
