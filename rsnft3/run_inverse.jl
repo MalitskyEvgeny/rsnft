@@ -39,6 +39,7 @@ function parse_cli()
         "--epochs"        ; default = "200-100,100-35,35-10,10-0"
         "--no-multilevel" ; action = :store_true
         "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE; grid-hierarchy fallback)"
+        "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
         "--out"           ; required = true
     end
     return parse_args(s)
@@ -87,7 +88,23 @@ function main()
                          weight_ro = args["weight-ro"], cache_dir = cache_dir)
     _WORKER_OBJ[] = obj      # BlackBoxOptim вызывает fitness и на главном
 
-    if !isempty(args["theta0-file"])
+    if !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
+        src = JSON.parsefile(args["theta0-file"])
+        theta0 = Float64.(src["best"]["theta"])
+        ladder = parse.(Float64, split(args["weight-ro-cal"], ","))
+        best = nothing; results = []
+        for wr in ladder
+            wobj = make_objective(data, wells, cfg, layout; reg = args["reg"],
+                                  weight_ro = wr, cache_dir = joinpath(cache_dir, "wr$wr"))
+            r = polish_from(wobj, theta0; nm_iterations = args["nm-iterations"],
+                            multilevel = !args["no-multilevel"])
+            println(@sprintf("weight_ro=%.0f: J=%.1f (J_T=%.1f J_Ro=%.1f J_reg=%.1f)",
+                             wr, r.J, r.J_T, r.J_Ro, r.J_reg))
+            push!(results, r)
+        end
+        sort!(results; by = r -> r.J)
+        best = first(results)
+    elseif !isempty(args["theta0-file"])
         src = JSON.parsefile(args["theta0-file"])
         theta0 = Float64.(src["best"]["theta"])
         println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
