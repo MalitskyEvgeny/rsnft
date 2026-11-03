@@ -180,3 +180,34 @@ function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{T
                  reg = reg, weight_ro = weight_ro, cache_dir = cache_dir)
     return myid()
 end
+
+"Полировка без DE: NM по уровням эпох из заданного старта (иерархия сеток:
+DE на грубой, полировка на рабочей)."
+function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 200,
+                     multilevel::Bool = true)
+    t0 = time()
+    θ = collect(Float64.(θ0))
+    length(θ) == length(obj.layout) || error("theta0 length mismatch")
+    nm_evals = 0
+    levels = multilevel ? collect(1:length(obj.layout.epochs)) : [length(obj.layout.epochs)]
+    for level in levels
+        idx = level_indices(obj.layout, level)
+        θstart = copy(θ)
+        active = fill(false, length(θ)); active[idx] .= true
+        θstart[.!active] .= obj.layout.x0[.!active]
+        fsub(θsub) = begin
+            θfull = copy(θstart)
+            θfull[idx] .= θsub
+            obj(θfull)[1]
+        end
+        res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
+                             Fminbox(NelderMead()),
+                             Optim.Options(iterations = nm_iterations,
+                                           x_abstol = 1e-6, f_abstol = 1e-6))
+        θ[idx] .= Optim.minimizer(res)
+        nm_evals += Optim.f_calls(res)
+    end
+    J, info = obj(θ)
+    return InversionResult(θ, J, info.J_T, info.J_Ro, info.J_reg,
+                           0, nm_evals, time() - t0, 0)
+end

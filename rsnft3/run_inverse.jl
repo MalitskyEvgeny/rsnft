@@ -38,6 +38,7 @@ function parse_cli()
         "--mid-x"         ; arg_type = Float64; default = 23400.0
         "--epochs"        ; default = "200-100,100-35,35-10,10-0"
         "--no-multilevel" ; action = :store_true
+        "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE; grid-hierarchy fallback)"
         "--out"           ; required = true
     end
     return parse_args(s)
@@ -86,10 +87,19 @@ function main()
                          weight_ro = args["weight-ro"], cache_dir = cache_dir)
     _WORKER_OBJ[] = obj      # BlackBoxOptim вызывает fitness и на главном
 
-    results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
-                              multilevel = !args["no-multilevel"], seed0 = args["seed"],
-                              nm_iterations = args["nm-iterations"])
-    best = first(results)
+    if !isempty(args["theta0-file"])
+        src = JSON.parsefile(args["theta0-file"])
+        theta0 = Float64.(src["best"]["theta"])
+        println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
+        best = polish_from(obj, theta0; nm_iterations = args["nm-iterations"],
+                           multilevel = !args["no-multilevel"])
+        results = [best]
+    else
+        results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
+                                  multilevel = !args["no-multilevel"], seed0 = args["seed"],
+                                  nm_iterations = args["nm-iterations"])
+        best = first(results)
+    end
 
     # финальный прогон и критерии
     pdata = make_param_data(data, layout, best.theta)
