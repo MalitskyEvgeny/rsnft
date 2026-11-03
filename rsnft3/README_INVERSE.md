@@ -1,100 +1,143 @@
-# Inverse problem: basal heat flow q(x,t) from well data
+# Обратная задача: глубинный тепловой поток q(x,t) по данным скважин
 
-Reconstruction of the unknown basal heat flow **q(x,t)** (piecewise in 4
-epochs × 2–3 x-nodes) of the 2-D basin forward model (`basin_fvm.jl`) from
-well observations: temperature profiles (σ_T) and vitrinite reflectance
-(EASY%Ro, σ_Ro).
+Восстановление неизвестного глубинного теплового потока **q(x,t)**
+(кусочно-постоянного по 4 эпохам × 2–3 x-узлам) 2-D бассейновой прямой модели
+(`basin_fvm.jl`) по скважинным наблюдениям: температурные профили (σ_T) и
+отражательная способность витринита (EASY%Ro, σ_Ro).
 
 ```
-parameterized_data.jl   ThetaLayout + make_param_data: θ -> synthetic heat Workbook
-ro_kinetics.jl          EASY%Ro post-processor over a forward run
-observations.jl         WellPoint/WellSet loaders (organizers' XLSX, twin JSON) + load_wells_multi
-objective.jl            J(θ): forward run on the working grid -> sampled T/Ro residuals + cache
-criteria.jl             per-well RMSE, fractions within σ/2σ (criterion 18), E^L2
-invert.jl               DE (BlackBoxOptim) -> multilevel NM polish -> ensemble
-run_inverse.jl          CLI entry point  ->  results/<run>/solution.json + result.npz
-make_twin.jl            twin observations from a known θ_true
-report_inverse.jl       self-contained HTML report
+parameterized_data.jl   ThetaLayout + make_param_data: θ -> синтетический heat Workbook
+ro_kinetics.jl          постпроцессор EASY%Ro поверх прогона прямой задачи
+observations.jl         загрузчики WellPoint/WellSet (XLSX организаторов, twin-JSON) + load_wells_multi
+objective.jl            J(θ): прогон на рабочей сетке -> невязки T/Ro в точках + кэш
+criteria.jl             RMSE по скважинам, доли |res| ≤ σ/2σ (условие 18), E^L2
+invert.jl               DE (BlackBoxOptim) -> многоуровневая NM-полировка -> ансамбль
+run_inverse.jl          CLI-точка входа -> results/<run>/solution.json + result.npz
+make_twin.jl            генерация twin-наблюдений из известного θ_true
+report_inverse.jl       самодостаточный HTML-отчёт
 ```
 
-## 1. Working grid and budget
+## 1. Рабочая сетка и бюджет
 
-The working grid was fixed by timing (step 0): **100×120**, forward ≈ 8.4 s
-(200×240 ≈ 76 s, 300×360 ≈ 322 s). One J evaluation ≈ 1.2 s per worker.
-Default budget: DE 4000–8000 evals, ensemble 4 starts, 4 workers ⇒ a full
-run fits in ≈ 1–2 h. Use `--grid 50,60` for pipeline debugging (~1.2 s/run).
+Рабочая сетка зафиксирована замерами (шаг 0 плана): **100×120**, прямой прогон
+≈ 8.4 с (200×240 ≈ 76 с, 300×360 ≈ 322 с). Одна оценка J ≈ 1.2 с на воркер
+(30×60). Дефолтный бюджет: DE 4000–8000 оценок, ансамбль 4 старта, 4 воркера.
 
-## 2. Twin verification (S1/S2 — run before touching real data)
+**Важно (вывод приёмочных прогонов):** полный запуск ансамбля на 100×120
+превышает 2 ч многократно — узкое место не DE, а *последовательная*
+NM-полировка (40 итераций NM в 12-мерном Fminbox ≈ 600 оценок J; на 60×120
+одна оценка ≈ 4.5 с). Рекомендуемая схема — **иерархия сеток** (fallback 0.2
+из плана): DE на 30×60 с twin, регенерированным на той же сетке, затем
+NM-полировка лучшего θ̂ на 60×120 через `--theta0-file`. Один такой цикл ≈ 2 ч,
+ансамбль 4 стартов ≈ 5–6 ч. Для отладки конвейера — `--grid 50,60` (~1.2 с/прогон).
+
+## 2. Twin-верификация (S1/S2 — запускать до реальных данных)
 
 ```bash
-# exact twin (sigma=0): theta_hat must reproduce theta_true, J -> 0
+# точный twin (σ=0): θ̂ должен воспроизвести θ_true, J -> 0
 julia --project=. make_twin.jl --data-dir "../Данные для обратной задачи" \
       --wells "../Данные для обратной задачи/TemperatureWellData.xlsx" \
-      --grid 50,60 --q 75,80,85,90 --sigma-T 0 --sigma-Ro 0 \
-      --seed 42 --out ../data/twin_exact.json
+      --grid 30,60 --q 75,80,85,90 --sigma-T 0 --sigma-Ro 0 \
+      --seed 42 --out ../data/twin_exact_30x60.json
 
-# noisy twin (S2)
+# полная иерархия для точного twin: генерируем twin и на 60×120
+julia --project=. make_twin.jl ... --grid 60,120 --out ../data/twin_exact_60x120.json
+
+# зашумлённый twin (S2)
 julia --project=. make_twin.jl ... --sigma-T 2 --sigma-Ro 0.05 \
-      --seed 42 --out ../data/twin_noisy.json
+      --seed 42 --out ../data/twin_noisy_30x60.json   # и _60x120.json
 
-# inversion on the twin (same grid, theta_true hidden from the optimizer)
+# этап A: инверсия DE на 30×60 (twin на той же сетке!)
 julia --project=. run_inverse.jl --data-dir "../Данные для обратной задачи" \
-      --wells ../data/twin_noisy.json --grid 50,60 \
-      --ensemble 4 --workers 4 --de-budget 4000 --seed 1 \
+      --wells ../data/twin_noisy_30x60.json --grid 30,60 \
+      --ensemble 4 --workers 4 --de-budget 8000 --reg 0 --seed 2 \
+      --out ../results/twin_stageA
+
+# этап B: полировка на 60×120
+julia --project=. run_inverse.jl --data-dir "../Данные для обратной задачи" \
+      --wells ../data/twin_noisy_60x120.json --grid 60,120 --workers 1 \
+      --nm-iterations 40 --reg 0 --theta0-file ../results/twin_stageA/solution.json \
       --out ../results/inverse_twin
+
 julia --project=. report_inverse.jl ../results/inverse_twin
 ```
 
-## 3. Inversion on the real observations
+**Регуляризация и twin:** с reg > 0 оптимум смещается от θ_true (при reg=1
+штраф за ступени q 75→90 мВт/м² даёт J(θ_true)=225 > найденного минимума) —
+twin-проверка выполняется с `--reg 0`, тогда J(θ_true)=0 строго.
+
+## 3. Инверсия на реальных наблюдениях
 
 ```bash
+# этап A
 julia --project=. run_inverse.jl \
       --data-dir "../Данные для обратной задачи" \
       --wells "../Данные для обратной задачи/TemperatureWellData.xlsx;../Данные для обратной задачи/VitriniteWellData.xlsx" \
-      --grid 100,120 --ensemble 4 --workers 4 \
-      --de-budget 8000 --sigma-T 2 --sigma-Ro 0.05 --seed 1 \
+      --grid 30,60 --ensemble 1 --workers 4 --de-budget 8000 \
+      --reg 0 --sigma-T 2 --sigma-Ro 0.05 --seed 11 \
+      --out ../results/inverse_stageA
+
+# этап B (полировка; при необходимости калибровка weight_ro — на этапе A!)
+julia --project=. run_inverse.jl \
+      --data-dir "../Данные для обратной задачи" \
+      --wells "../Данные для обратной задачи/TemperatureWellData.xlsx;../Данные для обратной задачи/VitriniteWellData.xlsx" \
+      --grid 60,120 --workers 1 --nm-iterations 40 --reg 0 \
+      --theta0-file ../results/inverse_stageA/solution.json \
       --out ../results/inverse_real
+
 julia --project=. report_inverse.jl ../results/inverse_real
 ```
 
-Key options: `--epochs "200-100,100-35,35-10,10-0"`, `--n-nodes 2|3`
-(dim = epochs × nodes = 8|12), `--mid-x` (middle q-node), `--reg`
-(spatial/epoch smoothness weight), `--weight-ro` (Ro contribution weight),
-`--no-multilevel` (fit all epochs at once instead of young→old).
+Ключевые опции: `--epochs "200-100,100-35,35-10,10-0"`,
+`--n-nodes 2|3` (dim = эпохи × узлы = 8|12), `--mid-x` (средний q-узел),
+`--reg` (вес гладкости по x и эпохам), `--weight-ro` (вес Ro-слагаемого),
+`--weight-ro-cal 1,10,50` (лестница калибровки weight_ro для θ̂ из
+`--theta0-file`; **выполнять только на грубой сетке** — на 60×120 одна
+ступень занимает часы), `--no-multilevel` (все эпохи сразу вместо
+«молодая → старая»).
 
-Outputs per run directory: `solution.json` (θ̂ ensemble, criteria, settings),
-`result.npz` (fields of the best θ̂), `report.html`, `cache_main/` (J cache —
-safe to delete; speeds up restarts of the same run).
+Результаты в каталоге прогона: `solution.json` (ансамбль θ̂, критерии,
+настройки), `result.npz` (поля лучшего θ̂), `report.html`, `cache_main/`
+(кэш J — можно удалять; ускоряет рестарты того же прогона).
 
-## 4. How to interpret the results
+## 4. Как интерпретировать результаты
 
-1. **Criterion 18 (acceptance)**: the fractions "% of points within σ / 2σ".
-   A run is acceptable when RMSE ≤ 2σ and ≥ 95 % of points fall within 2σ.
-   If RMSE_T ≫ σ_T: the model does not explain temperature — look at where
-   the misfit sits (upper profile → surface temperature/properties, lower → q).
-2. **Ensemble θ̂ table (mean/std/min/max)**: std ≪ box width ⇒ the parameter
-   is identified; std ≈ half the box ⇒ non-uniqueness. Ro integrates the full
-   thermal history, so it struggles to separate "short and hot" from "long
-   and moderate" — expect the old epochs to be the least constrained.
-3. **Per-well profiles**: the western wells (A, B) sit on the thin wedge where
-   Layer_1 does not cover the section; their T misfit weights the youngest
-   strata. Systematic +Ro bias at depth (the constant-q prior) is exactly the
-   inversion signal.
-4. **J_reg** grows if the optimizer wants a rough q(x) — a large jump from the
-   smooth prior means the data demand lateral variability; check the
-   x-node columns of θ̂ for that.
-5. **Grid convergence**: acceptance on the working grid; re-run the best θ̂
-   on a 1.5× finer grid as a control (a change of grid is a change of model —
-   report both).
+1. **Условие (18), приёмка**: доли «% точек в σ / в 2σ». Прогон приемлем,
+   когда RMSE ≤ 2σ и ≥ 95% точек попадает в 2σ. Если RMSE_T ≫ σ_T — модель
+   не объясняет температуру: смотреть, где сидит невязка (верх профиля →
+   Tsurf/свойства, низ → q).
+2. **Таблица θ̂ ансамбля (mean/std/min/max)**: std ≪ ширины бокса — параметр
+   выявлен; std ≈ полбокса — неединственность. Ro интегрирует всю тепловую
+   историю, поэтому «короткий горячий» vs «долгий умеренный» разделяет плохо —
+   старые эпохи будут наименее ограничены (подтверждено: разброс локализован
+   именно в x-узлах эпох 200–100 и 100–35 Ma).
+3. **Профили по скважинам**: западные скважины (A, B) сидят на тонком клине,
+   где Layer_1 не покрывает разрез; их невязка T взвешивает молодые толщи.
+   Систематическое завышение Ro внизу при константном q — это и есть
+   инверсионный сигнал.
+4. **J_reg**: большой скачок от гладкого приора означает, что данные требуют
+   латеральной изменчивости q(x); проверить x-узловые столбцы θ̂.
+5. **Сеточная сходимость**: приёмка — на рабочей сетке; лучший θ̂ дополнительно
+   прогоняется на сетке ×1.5 как контроль (смена сетки = смена модели —
+   идентифицируемость, см. research/identifiability.md).
+6. **Неединственность ансамбля**: независимые старты DE сходятся к Jmin с
+   разбросом < 0.1% (проверено на S2) — минимум устойчив; сравнивайте J между
+   стартами, прежде чем интерпретировать разброс θ̂ как физическую
+   неединственность.
 
-## 5. Pitfalls
+## 5. Грабли
 
-- The XLSX well sheets use depth positive **downwards**; the loaders already
-  convert. Well A (x=400) has 2 points outside the sediment geometry — they
-  are dropped at load time and counted in `solution.json`.
-- The J cache is keyed by θ (SHA-256 of the rounded vector): identical θ from
-  different starts are free. Cache format mismatch is handled on load.
-- First run after `addprocs` pays per-worker JIT (~20–30 s); the budget
-  estimates above refer to steady state.
-- With `--sigma-T 0` (exact twin) residuals are unweighted; criterion 18
-  fractions are reported as null.
+- Глубина в XLSX организаторов положительна **вниз**; загрузчики уже это
+  учитывают. У скважины A (x=400) 2 точки вне осадочной геометрии —
+  отбрасываются при загрузке и считаются в `solution.json`.
+- Кэш J ключуется по θ (SHA-256 округлённого вектора): одинаковые θ из разных
+  стартов бесплатны. Старый формат кэша (скаляр J) поднимается автоматически.
+- Первый запуск после `addprocs` платит за JIT каждого воркера (~20–30 с);
+  оценки бюджета выше — для steady state.
+- При `--sigma-T 0` (точный twin) невязки входят без нормировки (вес 1),
+  а доли «в σ» в отчёте будут null — это ожидаемо.
+- NM-полировка: `--nm-iterations` ограничивает итерации, а не число вызовов J;
+  реальное число оценок в 10–15 раз больше. Для быстрой полировки ставьте
+  30–40 итераций.
+- Julia лучше запускать с `-t 8` (потоки полезны для внутренних операций);
+  DE параллелится по воркерам независимо от `-t`, NM — строго последователен.
