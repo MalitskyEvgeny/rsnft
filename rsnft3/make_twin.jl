@@ -30,6 +30,10 @@ function parse_cli()
         "--sigma-T"  ; arg_type = Float64; default = 0.0
         "--sigma-Ro" ; arg_type = Float64; default = 0.0
         "--seed"     ; arg_type = Int; default = 42
+        "--adaptive"  ; action = :store_true; help = "generate truth on the adaptive grid (reference backend)"
+        "--adaptive-base" ; default = "16,32"; help = "adaptive base grid nx,nz"
+        "--adaptive-level"; arg_type = Int; default = 3; help = "adaptive max refinement level"
+        "--adaptive-preview"; default = "120,160"; help = "adaptive preview grid nx,nz"
         "--out"      ; required = true
     end
     return parse_args(s)
@@ -55,8 +59,24 @@ function main()
         error("--q must have one value per epoch ($(length(layout.epochs)))")
 
     θ = theta_constant(layout, q_epochs)
-    pdata = make_param_data(data, layout, θ)
-    result = run_forward(pdata, cfg)
+    if args["adaptive"]
+        ab = parse.(Int, split(args["adaptive-base"], ","))
+        ap = parse.(Int, split(args["adaptive-preview"], ","))
+        acfg = AdaptiveConfig(base_nx = ab[1], base_nz = ab[2], max_level = args["adaptive-level"],
+                              preview_nx = ap[1], preview_nz = ap[2])
+        geo = precompute_adaptive_geometry(data, acfg)
+        ax0, ax1 = data.bounds[1], data.bounds[2]
+        apdx = (ax1 - ax0) / acfg.preview_nx
+        axg = collect(range(ax0 + 0.5 * apdx, ax1 - 0.5 * apdx; length = acfg.preview_nx))
+        qba = qbasal_by_age(layout, θ, axg, data.ages)
+        result = run_adaptive(data, acfg; qbasal_by_age = qba, qbasal_nodes_x = layout.nodes_x,
+                              geometry = geo)
+        println(@sprintf("twin adaptive forward done: %.1f s, cells=%d",
+                         result.elapsed_seconds, length(result.mesh.cells)))
+    else
+        pdata = make_param_data(data, layout, θ)
+        result = run_forward(pdata, cfg)
+    end
     fin = filter(isfinite, vec(result.temperature_c[end, :, :]))
     println(@sprintf("twin forward done: %.1f s, T_final %.2f..%.2f C",
                      result.elapsed_seconds, minimum(fin), maximum(fin)))

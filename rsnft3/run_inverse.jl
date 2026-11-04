@@ -45,6 +45,10 @@ function parse_cli()
         "--pcg-tol"       ; arg_type = Float64; default = 1.0e-8; help = "PCG relative tolerance"
         "--max-f-calls"   ; arg_type = Int; default = 0; help = "bound NM by J-evaluations (0 = unbounded)"
         "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
+        "--adaptive-final"; action = :store_true; help = "control stage: evaluate criteria on the adaptive grid at the best theta"
+        "--adaptive-base" ; default = "16,32"; help = "adaptive base grid nx,nz (with --adaptive-final)"
+        "--adaptive-level"; arg_type = Int; default = 2; help = "adaptive max refinement level (with --adaptive-final)"
+        "--adaptive-preview"; default = "120,160"; help = "adaptive preview grid nx,nz for observation sampling"
         "--out"           ; required = true
     end
     return parse_args(s)
@@ -145,6 +149,40 @@ function main()
         "final_surface_m" => result.final_surface_m,
         "final_base_m" => result.final_base_m))
 
+    adaptive_rep = nothing
+    if args["adaptive-final"]
+        ab = parse.(Int, split(args["adaptive-base"], ","))
+        ap = parse.(Int, split(args["adaptive-preview"], ","))
+        acfg = AdaptiveConfig(base_nx = ab[1], base_nz = ab[2], max_level = args["adaptive-level"],
+                              max_dt_ma = args["max-dt-ma"],
+                              picard_iterations = args["picard-iters"],
+                              picard_tolerance_c = args["picard-tol"],
+                              preview_nx = ap[1], preview_nz = ap[2])
+        println("ADAPTIVE control stage: base=$(ab[1])x$(ab[2]) level=$(args["adaptive-level"]) preview=$(ap[1])x$(ap[2])")
+        aobj = make_objective(data, wells, cfg, layout; reg = args["reg"],
+                              weight_ro = args["weight-ro"],
+                              backend = :adaptive, adaptive_cfg = acfg)
+        aJ, ainfo = aobj(best.theta)
+        bnds = data.bounds
+        apdx = (bnds[2] - bnds[1]) / acfg.preview_nx
+        axg = collect(range(bnds[1] + 0.5 * apdx, bnds[2] - 0.5 * apdx; length = acfg.preview_nx))
+        aresult = run_adaptive(data, acfg;
+                               qbasal_by_age = qbasal_by_age(layout, best.theta, axg, data.ages),
+                               qbasal_nodes_x = layout.nodes_x,
+                               geometry = aobj.geometry)
+        adaptive_rep = criteria_report(aresult, data, wells)
+        npzwrite(joinpath(out_dir, "result_adaptive.npz"), Dict(
+            "x" => aresult.x, "z" => aresult.z, "ages_ma" => aresult.ages_ma,
+            "temperature_c" => aresult.temperature_c,
+            "final_lithology" => aresult.final_lithology,
+            "final_porosity" => aresult.final_porosity,
+            "final_surface_m" => aresult.final_surface_m,
+            "final_base_m" => aresult.final_base_m))
+        println(@printf("ADAPTIVE J=%.2f (J_T=%.2f J_Ro=%.2f)  RMSE_T=%.2f RMSE_Ro=%.3f  T in 2s: %.1f%%",
+                        aJ, ainfo.J_T, ainfo.J_Ro, adaptive_rep.rmse_T, adaptive_rep.rmse_Ro,
+                        100 * adaptive_rep.frac_2s_T))
+    end
+
     solution = OrderedDict{String,Any}(
         "status" => "complete",
         "data_dir" => abspath(args["data-dir"]),
@@ -177,6 +215,16 @@ function main()
                 for w in rep.wells]),
         "elapsed_total_s" => time() - t_start,
     )
+    if adaptive_rep !== nothing
+        solution["adaptive"] = OrderedDict(
+            "base" => args["adaptive-base"], "level" => args["adaptive-level"],
+            "preview" => args["adaptive-preview"],
+            "criteria" => OrderedDict(
+                "rmse_T" => adaptive_rep.rmse_T, "rmse_Ro" => adaptive_rep.rmse_Ro,
+                "frac_1s_T" => adaptive_rep.frac_1s_T, "frac_2s_T" => adaptive_rep.frac_2s_T,
+                "frac_1s_Ro" => adaptive_rep.frac_1s_Ro, "frac_2s_Ro" => adaptive_rep.frac_2s_Ro,
+                "l2" => adaptive_rep.l2))
+    end
     open(joinpath(out_dir, "solution.json"), "w") do f
         JSON.print(f, nan2null(solution), 2)
     end
