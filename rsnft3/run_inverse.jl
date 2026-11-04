@@ -159,6 +159,9 @@ function main()
         fxg = collect(range(bnds[1] + 0.5 * fpdx, bnds[2] - 0.5 * fpdx; length = acfg.preview_nx))
         result = run_adaptive(data, acfg; qbasal_by_age = qbasal_by_age(layout, best.theta, fxg, data.ages),
                               qbasal_nodes_x = layout.nodes_x, geometry = obj.geometry)
+        mesh_png = save_mesh_drawing(result.mesh, result.grid, result.final_temperature_cells,
+                                     joinpath(out_dir, "mesh_adaptive.png"))
+        println("MESH_PNG ", mesh_png)
     else
         pdata = make_param_data(data, layout, best.theta)
         result = run_forward(pdata, cfg)
@@ -194,6 +197,9 @@ function main()
             "final_porosity" => aresult.final_porosity,
             "final_surface_m" => aresult.final_surface_m,
             "final_base_m" => aresult.final_base_m))
+        mesh_png = save_mesh_drawing(aresult.mesh, aresult.grid, aresult.final_temperature_cells,
+                                     joinpath(out_dir, "mesh_adaptive.png"))
+        println("MESH_PNG ", mesh_png)
         println(@printf("ADAPTIVE J=%.2f (J_T=%.2f J_Ro=%.2f)  RMSE_T=%.2f RMSE_Ro=%.3f  T in 2s: %.1f%%",
                         aJ, ainfo.J_T, ainfo.J_Ro, adaptive_rep.rmse_T, adaptive_rep.rmse_Ro,
                         100 * adaptive_rep.frac_2s_T))

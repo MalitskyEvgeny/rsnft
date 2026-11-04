@@ -30,6 +30,8 @@ Base.@kwdef struct AdaptiveConfig
     initial_lambda::Float64 = 2.5
     preview_nx::Int = 160
     preview_nz::Int = 240
+    well_spots::Vector{Tuple{Float64,Float64}} = Tuple{Float64,Float64}[]
+    well_refine_radius::Int = 2   # радиус вокруг точки наблюдения, в мелких ячейках
 end
 
 function validate(c::AdaptiveConfig)
@@ -245,8 +247,26 @@ function nan_extrema(v::AbstractVector)
     return isinf(lo) ? (NaN, NaN) : (lo, hi)    # все NaN -> NaN, сравнения дают false
 end
 
+"True if the cell overlaps the refinement box around any observation spot."
+function cell_near_well_spot(cell::Cell, bounds::NTuple{4,Float64}, config::AdaptiveConfig)
+    isempty(config.well_spots) && return false
+    x_min, x_max, z_min, z_max = bounds
+    scale = 2^config.max_level
+    dxf = (x_max - x_min) / (config.base_nx * scale)
+    dzf = (z_max - z_min) / (config.base_nz * scale)
+    xa, xb = x_min + cell.ix0 * dxf, x_min + cell.ix1 * dxf
+    za, zb = z_min + cell.iz0 * dzf, z_min + cell.iz1 * dzf
+    r = config.well_refine_radius
+    for (wx, wz) in config.well_spots
+        (xa <= wx <= xb || xb <= wx + r * dxf && wx - r * dxf <= xa) || continue
+        (za <= wz <= zb || zb <= wz + r * dzf && wz - r * dzf <= za) && return true
+    end
+    return false
+end
+
 function cell_intersects_refinement_zone(cell::Cell, probe_x::AbstractVector, state::State,
                                          bounds::NTuple{4,Float64}, config::AdaptiveConfig)
+    cell_near_well_spot(cell, bounds, config) && return true
     x_min, x_max, z_min, z_max = bounds
     scale = 2^config.max_level
     dxf = (x_max - x_min) / (config.base_nx * scale)
