@@ -8,6 +8,8 @@ using SHA
 include(joinpath(@__DIR__, "parameterized_data.jl"))
 include(joinpath(@__DIR__, "ro_kinetics.jl"))
 include(joinpath(@__DIR__, "observations.jl"))
+# Адаптивный бэкенд (включает basin_fvm.jl — уже загружен, guard внутри)
+isdefined(@__MODULE__, :AdaptiveConfig) || include(joinpath(@__DIR__, "adaptive_basin_fvm.jl"))
 
 "Билинейная выборка поля field (nz, nx) на сетке (xg, zg) в точке (x, z)."
 function bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
@@ -50,12 +52,15 @@ struct Objective
     cache::Dict{String,Vector{Float64}}    # key -> [J, J_T, J_Ro, J_reg]
     cache_path::String                     # "" — только в памяти
     evals::Base.RefValue{Int}
-    geometry::ForwardGeometry              # тета-независимая часть прогона
+    geometry::Any                          # ForwardGeometry | AdaptiveGeometry
+    backend::Symbol                        # :regular | :adaptive
+    adaptive_cfg::Union{Nothing,AdaptiveConfig}
 end
 
 "Маска активных ячеек (nz, nx): ячейка накрыта хотя бы одним слоем на age 0."
-function sediment_mask(data::BasinDataset, cfg::SolverConfig)
-    nx, nz = cfg.nx, cfg.nz
+sediment_mask(data::BasinDataset, cfg::SolverConfig) = sediment_mask_xy(data, cfg.nx, cfg.nz)
+
+function sediment_mask_xy(data::BasinDataset, nx::Int, nz::Int)
     b = data.bounds
     dx = (b[2] - b[1]) / nx; dz = (b[4] - b[3]) / nz
     xg = [b[1] + (i - 0.5) * dx for i in 1:nx]
@@ -89,15 +94,31 @@ data — датасет без heat (инжекция внутри objective); r
 разрешения, не ошибка данных), исключаются из J и считаются в n_dropped_T.
 """
 function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, layout::ThetaLayout;
-                        reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "")
-    active, xg, zg = sediment_mask(data, cfg)
+                        reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "",
+                        backend::Symbol = :regular, adaptive_cfg = nothing)
+    adaptive_geo = backend === :adaptive ? precompute_adaptive_geometry(data, adaptive_cfg) : nothing
+    if backend === :adaptive
+        # маска = проекция активных ячеек финального меша (состояние age 0) на preview
+        last = adaptive_geo.steps[end]
+        _, _, act = mesh_to_regular(last.mesh, Float64.(last.grid.active),
+                                    adaptive_cfg.preview_nx, adaptive_cfg.preview_nz)
+        b = data.bounds
+        pdx = (b[2] - b[1]) / adaptive_cfg.preview_nx
+        pdz = (b[4] - b[3]) / adaptive_cfg.preview_nz
+        xg = collect(range(b[1] + 0.5 * pdx, b[2] - 0.5 * pdx; length = adaptive_cfg.preview_nx))
+        zg = collect(range(b[3] + 0.5 * pdz, b[4] - 0.5 * pdz; length = adaptive_cfg.preview_nz))
+        active = act .> 0.0
+    else
+        active, xg, zg = sediment_mask(data, cfg)
+    end
     t_targets = TTarget[]
     n_dropped = 0
+    gnx, gnz = size(active, 2), size(active, 1)
     stencil_ok(x, z) = begin
         fx = (x - xg[1]) / (xg[2] - xg[1]) + 0.5
         fz = (z - zg[1]) / (zg[2] - zg[1]) + 0.5
-        i0 = clamp(floor(Int, fx), 1, cfg.nx); i1 = clamp(i0 + 1, 1, cfg.nx)
-        j0 = clamp(floor(Int, fz), 1, cfg.nz); j1 = clamp(j0 + 1, 1, cfg.nz)
+        i0 = clamp(floor(Int, fx), 1, gnx); i1 = clamp(i0 + 1, 1, gnx)
+        j0 = clamp(floor(Int, fz), 1, gnz); j1 = clamp(j0 + 1, 1, gnz)
         active[j0, i0] && active[j0, i1] && active[j1, i0] && active[j1, i1]
     end
     for p in wells.points
@@ -121,10 +142,10 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
                 cache[k] = [Float64(v), NaN, NaN, NaN]   # старый формат (скаляр J)
         end
     end
-    geometry = precompute_geometry(data, cfg)
+    geometry = backend === :adaptive ? adaptive_geo : precompute_geometry(data, cfg)
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
                      t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0),
-                     geometry)
+                     geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
 end
 
 "θ → qbasal (Вт/м²) на x-сетке прогона для каждого возраста; эквивалент
@@ -170,8 +191,19 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     end
     t0 = time()
     obj.evals[] += 1
-    qba = qbasal_by_age(obj.layout, θ, obj.geometry.x, obj.data.ages)
-    result = run_forward(obj.data, obj.cfg; geometry = obj.geometry, qbasal_by_age = qba)
+    if obj.backend === :adaptive
+        ac = obj.adaptive_cfg
+        ax0, ax1 = obj.data.bounds[1], obj.data.bounds[2]
+        adx = (ax1 - ax0) / ac.preview_nx
+        axg = collect(range(ax0 + 0.5 * adx, ax1 - 0.5 * adx; length = ac.preview_nx))
+        result = run_adaptive(obj.data, ac;
+                              qbasal_by_age = qbasal_by_age(obj.layout, θ, axg, obj.data.ages),
+                              qbasal_nodes_x = obj.layout.nodes_x,
+                              geometry = obj.geometry)
+    else
+        result = run_forward(obj.data, obj.cfg; geometry = obj.geometry,
+                             qbasal_by_age = qbasal_by_age(obj.layout, θ, obj.geometry.x, obj.data.ages))
+    end
     xg, zg = result.x, result.z
     temp0 = result.temperature_c[end, :, :]          # (nz, nx), t = 0
 
