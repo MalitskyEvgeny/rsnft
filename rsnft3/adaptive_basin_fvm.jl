@@ -32,6 +32,7 @@ Base.@kwdef struct AdaptiveConfig
     preview_nz::Int = 240
     well_spots::Vector{Tuple{Float64,Float64}} = Tuple{Float64,Float64}[]
     well_refine_radius::Int = 2   # радиус вокруг точки наблюдения, в мелких ячейках
+    frozen_mesh::Bool = false     # меш строится один раз на финальной стратиграфии
 end
 
 function validate(c::AdaptiveConfig)
@@ -571,7 +572,8 @@ end
 function precompute_adaptive_geometry(data::BasinDataset, config::AdaptiveConfig)
     validate(config)
     ages = data.ages
-    mesh = build_mesh(data, ages[1], ages[1], 0.0, config)
+    mesh = build_mesh(data, config.frozen_mesh ? ages[end] : ages[1],
+                      config.frozen_mesh ? ages[end] : ages[1], 0.0, config)
     state = state_at(data, ages[1], ages[1], 0.0, mesh.xc; with_heat = false)
     grid = rasterize_cells(state, mesh)
     steps = AdaptiveStepGeom[]
@@ -582,12 +584,21 @@ function precompute_adaptive_geometry(data::BasinDataset, config::AdaptiveConfig
         previous_older, previous_younger = older_age, younger_age
         for k in 1:n_steps
             fraction = k / n_steps
-            new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
-            new_state = state_at(data, older_age, younger_age, fraction, new_mesh.xc;
-                                 with_heat = false)
-            new_grid = rasterize_cells(new_state, new_mesh)
-            old_state_on_new_x = state_at(data, previous_older, previous_younger,
-                                          previous_fraction, new_mesh.xc; with_heat = false)
+            if config.frozen_mesh
+                new_mesh = mesh
+                new_state = state_at(data, older_age, younger_age, fraction, mesh.xc;
+                                     with_heat = false)
+                new_grid = rasterize_cells(new_state, mesh)
+                old_state_on_new_x = state_at(data, previous_older, previous_younger,
+                                              previous_fraction, mesh.xc; with_heat = false)
+            else
+                new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
+                new_state = state_at(data, older_age, younger_age, fraction, new_mesh.xc;
+                                     with_heat = false)
+                new_grid = rasterize_cells(new_state, new_mesh)
+                old_state_on_new_x = state_at(data, previous_older, previous_younger,
+                                              previous_fraction, new_mesh.xc; with_heat = false)
+            end
             push!(steps, AdaptiveStepGeom(new_mesh, new_state, new_grid, old_state_on_new_x,
                                           older_age, younger_age, fraction,
                                           span / n_steps * SECONDS_PER_MA))
@@ -604,7 +615,9 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
                       geometry = nothing)
     validate(config)
     ages = data.ages
-    mesh = geometry === nothing ? build_mesh(data, ages[1], ages[1], 0.0, config) : geometry.initial_mesh
+    mesh = geometry === nothing ?
+        build_mesh(data, config.frozen_mesh ? ages[end] : ages[1],
+                   config.frozen_mesh ? ages[end] : ages[1], 0.0, config) : geometry.initial_mesh
     state = with_qbasal(
         geometry === nothing ?
             state_at(data, ages[1], ages[1], 0.0, mesh.xc; with_heat = false) :
@@ -638,16 +651,29 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
                 dt_seconds = sg.dt_seconds
             else
                 fraction = step / steps
-                new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
-                new_state = with_qbasal(
-                    state_at(data, older_age, younger_age, fraction, new_mesh.xc;
-                             with_heat = false),
-                    qbasal_by_age, qbasal_nodes_x, new_mesh.xc;
-                    age_old = older_age, age_young = younger_age, fraction = fraction)
-                new_grid = rasterize_cells(new_state, new_mesh)
-                old_state_on_new_x = state_at(
-                    data, previous_older, previous_younger, previous_fraction, new_mesh.xc;
-                    with_heat = false)
+                if config.frozen_mesh
+                    new_mesh = mesh
+                    new_state = with_qbasal(
+                        state_at(data, older_age, younger_age, fraction, mesh.xc;
+                                 with_heat = false),
+                        qbasal_by_age, qbasal_nodes_x, mesh.xc;
+                        age_old = older_age, age_young = younger_age, fraction = fraction)
+                    new_grid = rasterize_cells(new_state, mesh)
+                    old_state_on_new_x = state_at(
+                        data, previous_older, previous_younger, previous_fraction, mesh.xc;
+                        with_heat = false)
+                else
+                    new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
+                    new_state = with_qbasal(
+                        state_at(data, older_age, younger_age, fraction, new_mesh.xc;
+                                 with_heat = false),
+                        qbasal_by_age, qbasal_nodes_x, new_mesh.xc;
+                        age_old = older_age, age_young = younger_age, fraction = fraction)
+                    new_grid = rasterize_cells(new_state, new_mesh)
+                    old_state_on_new_x = state_at(
+                        data, previous_older, previous_younger, previous_fraction, new_mesh.xc;
+                        with_heat = false)
+                end
                 dt_seconds = span / steps * SECONDS_PER_MA
             end
             transported = adaptive_remap(

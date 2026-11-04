@@ -50,6 +50,7 @@ function parse_cli()
         "--adaptive-base" ; default = "16,32"; help = "adaptive base grid nx,nz (with --adaptive-final)"
         "--adaptive-level"; arg_type = Int; default = 2; help = "adaptive max refinement level (with --adaptive-final)"
         "--adaptive-preview"; default = "120,160"; help = "adaptive preview grid nx,nz for observation sampling"
+        "--adaptive-frozen"; action = :store_true; help = "build the adaptive mesh once on the final stratigraphy (no per-substep rebuild/remap)"
         "--out"           ; required = true
     end
     return parse_args(s)
@@ -110,8 +111,9 @@ function main()
                               max_dt_ma = args["max-dt-ma"],
                               picard_iterations = args["picard-iters"],
                               picard_tolerance_c = args["picard-tol"],
-                              preview_nx = ap[1], preview_nz = ap[2])
-        println("ADAPTIVE backend: base=$(ab[1])x$(ab[2]) level=$(args["adaptive-level"]) preview=$(ap[1])x$(ap[2]) search=$(args["adaptive-search"])")
+                              preview_nx = ap[1], preview_nz = ap[2],
+                              frozen_mesh = args["adaptive-frozen"])
+        println("ADAPTIVE backend: base=$(ab[1])x$(ab[2]) level=$(args["adaptive-level"]) preview=$(ap[1])x$(ap[2]) search=$(args["adaptive-search"]) frozen=$(args["adaptive-frozen"])")
     end
     obj = make_objective(data, wells, cfg, layout; reg = args["reg"],
                          weight_ro = args["weight-ro"], cache_dir = cache_dir,
