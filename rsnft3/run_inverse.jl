@@ -109,7 +109,8 @@ function main()
             wobj = make_objective(data, wells, cfg, layout; reg = args["reg"],
                                   weight_ro = wr, cache_dir = joinpath(cache_dir, "wr$wr"))
             r = polish_from(wobj, theta0; nm_iterations = args["nm-iterations"],
-                            multilevel = !args["no-multilevel"])
+                            multilevel = !args["no-multilevel"],
+                            max_f_calls = args["max-f-calls"])
             println(@sprintf("weight_ro=%.0f: J=%.1f (J_T=%.1f J_Ro=%.1f J_reg=%.1f)",
                              wr, r.J, r.J_T, r.J_Ro, r.J_reg))
             push!(results, r)

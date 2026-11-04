@@ -95,7 +95,7 @@ function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool =
         res = Optim.optimize(fsub, layout.lower[idx], layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
                              Optim.Options(iterations = nm_iterations,
-                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : Inf,
+                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : typemax(Int),
                                            x_abstol = 1e-6, f_abstol = 1e-6))
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)
@@ -136,7 +136,7 @@ function invert_workers(obj::Objective; de_budget::Int = 4000, multilevel::Bool 
         res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
                              Optim.Options(iterations = nm_iterations,
-                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : Inf,
+                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : typemax(Int),
                                            x_abstol = 1e-6, f_abstol = 1e-6))
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)
@@ -213,7 +213,7 @@ function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 
         res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
                              Optim.Options(iterations = nm_iterations,
-                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : Inf,
+                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : typemax(Int),
                                            x_abstol = 1e-6, f_abstol = 1e-6))
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)
