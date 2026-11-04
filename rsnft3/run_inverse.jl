@@ -46,6 +46,7 @@ function parse_cli()
         "--max-f-calls"   ; arg_type = Int; default = 0; help = "bound NM by J-evaluations (0 = unbounded)"
         "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
         "--adaptive-final"; action = :store_true; help = "control stage: evaluate criteria on the adaptive grid at the best theta"
+        "--adaptive-search"; action = :store_true; help = "run the ENTIRE pipeline (search + criteria) on the adaptive grid; no uniform grid anywhere"
         "--adaptive-base" ; default = "16,32"; help = "adaptive base grid nx,nz (with --adaptive-final)"
         "--adaptive-level"; arg_type = Int; default = 2; help = "adaptive max refinement level (with --adaptive-final)"
         "--adaptive-preview"; default = "120,160"; help = "adaptive preview grid nx,nz for observation sampling"
@@ -100,8 +101,22 @@ function main()
         end
     end
     cache_dir = joinpath(out_dir, "cache_main")
+    use_adaptive = args["adaptive-search"] || args["adaptive-final"]
+    acfg = nothing
+    if use_adaptive
+        ab = parse.(Int, split(args["adaptive-base"], ","))
+        ap = parse.(Int, split(args["adaptive-preview"], ","))
+        acfg = AdaptiveConfig(base_nx = ab[1], base_nz = ab[2], max_level = args["adaptive-level"],
+                              max_dt_ma = args["max-dt-ma"],
+                              picard_iterations = args["picard-iters"],
+                              picard_tolerance_c = args["picard-tol"],
+                              preview_nx = ap[1], preview_nz = ap[2])
+        println("ADAPTIVE backend: base=$(ab[1])x$(ab[2]) level=$(args["adaptive-level"]) preview=$(ap[1])x$(ap[2]) search=$(args["adaptive-search"])")
+    end
     obj = make_objective(data, wells, cfg, layout; reg = args["reg"],
-                         weight_ro = args["weight-ro"], cache_dir = cache_dir)
+                         weight_ro = args["weight-ro"], cache_dir = cache_dir,
+                         backend = args["adaptive-search"] ? :adaptive : :regular,
+                         adaptive_cfg = acfg)
     _WORKER_OBJ[] = obj      # BlackBoxOptim вызывает fitness и на главном
 
     if !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
@@ -138,8 +153,16 @@ function main()
     end
 
     # финальный прогон и критерии
-    pdata = make_param_data(data, layout, best.theta)
-    result = run_forward(pdata, cfg)
+    if args["adaptive-search"]
+        bnds = data.bounds
+        fpdx = (bnds[2] - bnds[1]) / acfg.preview_nx
+        fxg = collect(range(bnds[1] + 0.5 * fpdx, bnds[2] - 0.5 * fpdx; length = acfg.preview_nx))
+        result = run_adaptive(data, acfg; qbasal_by_age = qbasal_by_age(layout, best.theta, fxg, data.ages),
+                              qbasal_nodes_x = layout.nodes_x, geometry = obj.geometry)
+    else
+        pdata = make_param_data(data, layout, best.theta)
+        result = run_forward(pdata, cfg)
+    end
     rep = criteria_report(result, data, wells)
     npzwrite(joinpath(out_dir, "result.npz"), Dict(
         "x" => result.x, "z" => result.z, "ages_ma" => result.ages_ma,
@@ -151,14 +174,7 @@ function main()
 
     adaptive_rep = nothing
     if args["adaptive-final"]
-        ab = parse.(Int, split(args["adaptive-base"], ","))
-        ap = parse.(Int, split(args["adaptive-preview"], ","))
-        acfg = AdaptiveConfig(base_nx = ab[1], base_nz = ab[2], max_level = args["adaptive-level"],
-                              max_dt_ma = args["max-dt-ma"],
-                              picard_iterations = args["picard-iters"],
-                              picard_tolerance_c = args["picard-tol"],
-                              preview_nx = ap[1], preview_nz = ap[2])
-        println("ADAPTIVE control stage: base=$(ab[1])x$(ab[2]) level=$(args["adaptive-level"]) preview=$(ap[1])x$(ap[2])")
+        println("ADAPTIVE control stage: base=$(args["adaptive-base"]) level=$(args["adaptive-level"]) preview=$(args["adaptive-preview"])")
         aobj = make_objective(data, wells, cfg, layout; reg = args["reg"],
                               weight_ro = args["weight-ro"],
                               backend = :adaptive, adaptive_cfg = acfg)
@@ -187,7 +203,8 @@ function main()
         "status" => "complete",
         "data_dir" => abspath(args["data-dir"]),
         "wells_spec" => args["wells"],
-        "grid" => OrderedDict("nx" => nx, "nz" => nz),
+        "grid" => OrderedDict("nx" => nx, "nz" => nz,
+                              "search_backend" => args["adaptive-search"] ? "adaptive" : "regular"),
         "layout" => OrderedDict("names" => layout.names, "nodes_x" => layout.nodes_x,
                                 "epochs" => [collect(e) for e in layout.epochs],
                                 "lower" => layout.lower, "upper" => layout.upper),
