@@ -20,7 +20,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RepoRoot      = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string]$RepoRoot      = "",
     [string]$JuliaExe      = "julia",
     [string]$DataDir       = "",
     [string]$Wells         = "",
@@ -49,6 +49,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# $PSScriptRoot is empty inside param() defaults (PS 5.1); resolve here.
+$ScriptRoot2 = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent (Split-Path -Parent $ScriptRoot2) }
 
 $Inv  = [System.Globalization.CultureInfo]::InvariantCulture
 $R3   = Join-Path $RepoRoot "rsnft3"
