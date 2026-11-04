@@ -41,12 +41,14 @@ Base.@kwdef struct SolverConfig
     fluid_density::Float64 = 1000.0
     fluid_heat_capacity::Float64 = 4180.0
     initial_lambda::Float64 = 2.5
+    pcg_tolerance::Float64 = 1.0e-8
 end
 
 function validate(c::SolverConfig)
     (c.nx < 3 || c.nz < 3) && throw(ArgumentError("nx and nz must be at least 3"))
     c.max_dt_ma <= 0 && throw(ArgumentError("max_dt_ma must be positive"))
     c.picard_iterations < 1 && throw(ArgumentError("picard_iterations must be positive"))
+    c.pcg_tolerance <= 0 && throw(ArgumentError("pcg_tolerance must be positive"))
     return nothing
 end
 
@@ -95,8 +97,10 @@ harmonic(a, b) = 2.0 * a * b / max(a + b, 1.0e-30)
 function pcg_solve(diagonal::Vector{Float64}, pair_p::Vector{Int}, pair_q::Vector{Int},
                    conductance::Vector{Float64}, rhs::Vector{Float64}, initial::Vector{Float64};
                    tolerance::Float64 = 1.0e-9, max_iterations::Int = 1000)
+    buf = similar(diagonal)
     function matvec(v::Vector{Float64})
-        result = diagonal .* v
+        result = buf
+        result .= diagonal .* v
         @inbounds for k in eachindex(pair_p)
             p = pair_p[k]; q = pair_q[k]; g = conductance[k]
             result[p] -= g * v[q]
@@ -230,10 +234,13 @@ const REQUIRED = (
     "Depth.xlsx",
     "Lithology.xlsx",
     "Porosity.xlsx",
-    "Heat_Flow_Basal.xlsx",
     "Tsurf.xlsx",
     "lithotype_properties.xlsx",
 )
+
+# Heat_Flow_Basal.xlsx опционален: в постановке обратной задачи 2026 q_basal(x,t) —
+# неизвестный, он инжектируется в памяти (parameterized_data.jl), а не читается из файла.
+const OPTIONAL = ("Heat_Flow_Basal.xlsx",)
 
 struct BasinDataset
     data_dir::String
@@ -262,7 +269,8 @@ function read_all(data_dir::AbstractString)
     depth    = read_workbook(joinpath(data_dir, "Depth.xlsx"))
     lith     = read_workbook(joinpath(data_dir, "Lithology.xlsx"))
     porosity = read_workbook(joinpath(data_dir, "Porosity.xlsx"))
-    heat     = read_workbook(joinpath(data_dir, "Heat_Flow_Basal.xlsx"))
+    heat_path = joinpath(data_dir, "Heat_Flow_Basal.xlsx")
+    heat     = isfile(heat_path) ? read_workbook(heat_path) : Workbook()
     tsurf    = read_workbook(joinpath(data_dir, "Tsurf.xlsx"))
 
     prop = DataFrame(XLSX.readtable(joinpath(data_dir, "lithotype_properties.xlsx"), 1))
@@ -335,7 +343,7 @@ function boundary_value(workbook::Workbook, age::Float64, x::AbstractVector)
     return out
 end
 
-function exact_state(data::BasinDataset, age::Float64, x::AbstractVector)
+function exact_state(data::BasinDataset, age::Float64, x::AbstractVector; with_heat::Bool = true)
     layers = Dict{String,Layer}()
     for (name, depth_series) in data.depth
         haskey(depth_series, age) || continue
@@ -356,11 +364,8 @@ function exact_state(data::BasinDataset, age::Float64, x::AbstractVector)
         surface .= min.(surface, l.top)
         base .= max.(base, l.bot)
     end
-    return State(
-        age, layers, surface, base,
-        boundary_value(data.tsurf_data, age, x),
-        boundary_value(data.heat, age, x) .* 1.0e-3,
-    )
+    q = with_heat ? boundary_value(data.heat, age, x) .* 1.0e-3 : zeros(length(x))
+    return State(age, layers, surface, base, boundary_value(data.tsurf_data, age, x), q)
 end
 
 # ----------------------------------------------------------------------------
@@ -420,9 +425,11 @@ function rasterize(state::State, z::AbstractVector)
 end
 
 function material_remap(temperature::Matrix{Float64}, old_state::State,
-                        new_state::State, z::AbstractVector)
-    old_grid = rasterize(old_state, z)
-    new_grid = rasterize(new_state, z)
+                        new_state::State, z::AbstractVector;
+                        old_grid::Union{Nothing,Grid} = nothing,
+                        new_grid::Union{Nothing,Grid} = nothing)
+    old_grid === nothing && (old_grid = rasterize(old_state, z))
+    new_grid === nothing && (new_grid = rasterize(new_state, z))
     nz, nx = size(temperature)
     out = fill(NaN, nz, nx)
     names = sort!(collect(keys(new_state.layers)))   # порядок фиксирован для воспроизводимости
@@ -468,6 +475,14 @@ function thermal_properties(temperature_c::Matrix{Float64}, grid::Grid,
     lam = fill(NaN, size(temperature_c))
     rho_c = fill(NaN, size(temperature_c))
     source = fill(NaN, size(temperature_c))
+    thermal_properties!(lam, rho_c, source, temperature_c, grid, lith_properties, config)
+    return lam, rho_c, source
+end
+
+function thermal_properties!(lam::Matrix{Float64}, rho_c::Matrix{Float64},
+                             source::Matrix{Float64}, temperature_c::Matrix{Float64},
+                             grid::Grid, lith_properties::Dict{Int,LithProp}, config::SolverConfig)
+    fill!(lam, NaN); fill!(rho_c, NaN); fill!(source, NaN)
     for idx in eachindex(temperature_c)
         grid.active[idx] || continue
         code = grid.lith[idx]
@@ -488,14 +503,17 @@ end
 
 function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::AbstractVector,
                            dx::Float64, dz::Float64, dt_seconds::Float64,
-                           lith_properties::Dict{Int,LithProp}, config::SolverConfig)
-    grid = rasterize(state, z)
+                           lith_properties::Dict{Int,LithProp}, config::SolverConfig;
+                           grid::Union{Nothing,Grid} = nothing)
+    grid === nothing && (grid = rasterize(state, z))
     active = grid.active
     nz, nx = size(active)
     ncell = count(active)
     indices = zeros(Int, nz, nx)
     indices[active] = 1:ncell
+    lam = similar(transported_c); rho_c = similar(transported_c); source = similar(transported_c)
     trial = copy(transported_c)
+    updated = similar(transported_c)
     max_change = Inf
     linear_iterations = 0
     linear_residual = Inf
@@ -503,7 +521,7 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
 
     for iteration in 1:config.picard_iterations
         picard_used = iteration
-        lam, rho_c, source = thermal_properties(trial, grid, lith_properties, config)
+        thermal_properties!(lam, rho_c, source, trial, grid, lith_properties, config)
         volume = dx * dz
         diagonal = rho_c[active] .* volume ./ dt_seconds
         rhs = diagonal .* transported_c[active] .+ source[active] .* volume
@@ -548,16 +566,17 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
 
         solution, linear_iterations, linear_residual = pcg_solve(
             diagonal, pair_p, pair_q, pair_g, rhs, trial[active];
-            tolerance = 1.0e-8, max_iterations = max(500, 4 * config.nx),
+            tolerance = config.pcg_tolerance,
+            max_iterations = max(2000, 8 * config.nx * config.nz),
         )
-        updated = fill(NaN, nz, nx)
+        fill!(updated, NaN)
         updated[active] = solution
         max_change = -Inf                      # np.nanmax(np.abs(updated - trial))
         for k in eachindex(updated)
             d = abs(updated[k] - trial[k])
             isnan(d) || (max_change = max(max_change, d))
         end
-        trial = updated
+        trial, updated = updated, trial        # double buffer, без копий
         max_change <= config.picard_tolerance_c && break
     end
 
@@ -569,8 +588,9 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
     )
 end
 
-function initialise_temperature(state::State, z::AbstractVector, config::SolverConfig)
-    grid = rasterize(state, z)
+function initialise_temperature(state::State, z::AbstractVector, config::SolverConfig;
+                                grid::Union{Nothing,Grid} = nothing)
+    grid === nothing && (grid = rasterize(state, z))
     nz, nx = length(z), length(state.surface)
     temperature = fill(NaN, nz, nx)
     for i in 1:nx, j in 1:nz
@@ -581,12 +601,120 @@ function initialise_temperature(state::State, z::AbstractVector, config::SolverC
     return temperature
 end
 
+struct StepGeometry
+    state::State                       # тета-независимая часть, qbasal = zeros
+    grid::Grid
+    age_old::Float64
+    age_young::Float64
+    fraction::Float64
+    dt_seconds::Float64
+end
+
+struct ForwardGeometry
+    steps::Vector{StepGeometry}
+    exact::Dict{Float64,State}
+    exact_grids::Dict{Float64,Grid}
+    x::Vector{Float64}
+    z::Vector{Float64}
+end
+
+patched_q(s::State, q::Vector{Float64}) =
+    State(s.age, s.layers, s.surface, s.base, s.tsurf, q)
+
+"Предвычисление всей тета-независимой части прогона: геометрия по шагам, гриды."
+function precompute_geometry(data::BasinDataset, config::SolverConfig)
+    x0, x1, z0, z1 = data.bounds
+    dx = (x1 - x0) / config.nx
+    dz = (z1 - z0) / config.nz
+    x = collect(range(x0 + 0.5 * dx, x1 - 0.5 * dx; length = config.nx))
+    z = collect(range(z0 + 0.5 * dz, z1 - 0.5 * dz; length = config.nz))
+    exact = Dict(age => exact_state(data, age, x; with_heat = false) for age in data.ages)
+    exact_grids = Dict(age => rasterize(exact[age], z) for age in data.ages)
+    steps = StepGeometry[]
+    for (age_old, age_young) in zip(data.ages[1:end-1], data.ages[2:end])
+        span = age_old - age_young
+        n_substeps = max(1, Int(ceil(span / config.max_dt_ma)))
+        for substep in 1:n_substeps
+            fraction = substep / n_substeps
+            state = interpolate_state(exact[age_old], exact[age_young], fraction)
+            push!(steps, StepGeometry(state, rasterize(state, z), age_old, age_young,
+                                      fraction, (span / n_substeps) * SECONDS_PER_MA))
+        end
+    end
+    return ForwardGeometry(steps, exact, exact_grids, x, z)
+end
+
 # ----------------------------------------------------------------------------
 # Прямая задача
 # ----------------------------------------------------------------------------
 
-function run_forward(data::BasinDataset, config::SolverConfig)
+function run_forward_param(data::BasinDataset, config::SolverConfig,
+                           geometry::ForwardGeometry,
+                           qba::Dict{Float64,Vector{Float64}})
+    x, z = geometry.x, geometry.z
+    dx = (data.bounds[2] - data.bounds[1]) / config.nx
+    dz = (data.bounds[4] - data.bounds[3]) / config.nz
+    age0 = data.ages[1]
+    s0 = patched_q(geometry.exact[age0], qba[age0])
+    temperature = initialise_temperature(s0, z, config; grid = geometry.exact_grids[age0])
+    saved_temperature = [copy(temperature)]
+    diagnostics = OrderedDict{String,Any}[]
+
+    start = time_ns()
+    previous_state = s0
+    previous_grid = geometry.exact_grids[age0]
+    for si in eachindex(geometry.steps)
+        step = geometry.steps[si]
+        qk = (1.0 - step.fraction) .* qba[step.age_old] .+
+             step.fraction .* qba[step.age_young]
+        state = patched_q(step.state, qk)
+        transported = material_remap(temperature, previous_state, state, z;
+                                     old_grid = previous_grid, new_grid = step.grid)
+        temperature, diag = implicit_fvm_step(
+            transported, state, z, dx, dz, step.dt_seconds, data.properties, config;
+            grid = step.grid)
+        push!(diagnostics, merge(OrderedDict{String,Any}("age_ma" => state.age), diag))
+        previous_state = state
+        previous_grid = step.grid
+        # снимок на границе эпохи — как в classic (push внутри цикла по эпохам)
+        if si == length(geometry.steps) ||
+           geometry.steps[si + 1].age_old != step.age_old
+            push!(saved_temperature, copy(temperature))
+        end
+    end
+
+    final_grid = geometry.exact_grids[data.ages[end]]
+    elapsed = (time_ns() - start) / 1.0e9
+
+    nt = length(saved_temperature)
+    temperature_c = Array{Float64,3}(undef, nt, config.nz, config.nx)
+    for k in 1:nt
+        temperature_c[k, :, :] = saved_temperature[k]
+    end
+
+    return (
+        x = x, z = z, ages_ma = copy(data.ages),
+        temperature_c = temperature_c,
+        final_lithology = final_grid.lith,
+        final_porosity = final_grid.phi,
+        final_surface_m = geometry.exact[data.ages[end]].surface,
+        final_base_m = geometry.exact[data.ages[end]].base,
+        diagnostics = diagnostics,
+        elapsed_seconds = elapsed,
+        dx = dx, dz = dz,
+    )
+end
+
+function run_forward(data::BasinDataset, config::SolverConfig;
+                     geometry::Union{Nothing,ForwardGeometry} = nothing,
+                     qbasal_by_age::Union{Nothing,Dict{Float64,Vector{Float64}}} = nothing)
     validate(config)
+    if geometry !== nothing
+        return run_forward_param(data, config, geometry,
+                                 qbasal_by_age === nothing ?
+                                 Dict(age => zeros(length(geometry.x)) for age in data.ages) :
+                                 qbasal_by_age)
+    end
     x0, x1, z0, z1 = data.bounds
     dx = (x1 - x0) / config.nx
     dz = (z1 - z0) / config.nz
@@ -614,6 +742,7 @@ function run_forward(data::BasinDataset, config::SolverConfig)
         end
         push!(saved_temperature, copy(temperature))
     end
+
 
     final_state = exact[data.ages[end]]
     final_grid = rasterize(final_state, z)

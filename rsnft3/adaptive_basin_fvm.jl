@@ -7,7 +7,7 @@
 # Запуск:
 #   julia adaptive_basin_fvm.jl --data-dir data --cache-dir adaptive_results
 
-include(joinpath(@__DIR__, "basin_fvm.jl"))
+isdefined(@__MODULE__, :BasinDataset) || include(joinpath(@__DIR__, "basin_fvm.jl"))
 
 const DEFAULT_DATA_DIR = raw"C:\Users\solo\Desktop\МЭИ\3 мага\роснефть\data1"
 
@@ -229,10 +229,10 @@ end
 # ----------------------------------------------------------------------------
 
 function state_at(data::BasinDataset, older_age::Float64, younger_age::Float64,
-                  fraction::Float64, x::AbstractVector)
-    older = exact_state(data, older_age, x)
+                  fraction::Float64, x::AbstractVector; with_heat::Bool = true)
+    older = exact_state(data, older_age, x; with_heat = with_heat)
     older_age == younger_age && return older
-    younger = exact_state(data, younger_age, x)
+    younger = exact_state(data, younger_age, x; with_heat = with_heat)
     return interpolate_state(older, younger, fraction)
 end
 
@@ -293,7 +293,7 @@ function build_mesh(data::BasinDataset, older_age::Float64, younger_age::Float64
     x_min, x_max, _, _ = data.bounds
     probe_count = max(257, config.base_nx * 2^config.max_level * 4 + 1)
     probe_x = collect(range(x_min, x_max; length = probe_count))
-    probe_state = state_at(data, older_age, younger_age, fraction, probe_x)
+    probe_state = state_at(data, older_age, younger_age, fraction, probe_x; with_heat = false)
     scale = 2^config.max_level
     cells = Cell[]
     for j in 0:(config.base_nz-1)          # порядок обхода как в Python: j внешний, i внутренний
@@ -304,6 +304,22 @@ function build_mesh(data::BasinDataset, older_age::Float64, younger_age::Float64
     end
     cells = balance_cells(cells, config.max_level)
     return AdaptiveMesh(cells, data.bounds, config)
+end
+
+
+# qbasal-инъекция (эквивалент patched_q в run_forward_param): q на узлах
+# nodes_x интерполируется линейно по времени между эпохами и по x на xc ячеек.
+# Значения qba — уже в Вт/м² (конверсия 1e-3 сделана в qbasal_by_age).
+function with_qbasal(state::State, qba::Union{Nothing,Dict{Float64,Vector{Float64}}},
+                     nodes_x::Union{Nothing,AbstractVector}, x::AbstractVector;
+                     age_old::Float64 = state.age, age_young::Float64 = state.age,
+                     fraction::Float64 = 0.0)
+    (qba === nothing || nodes_x === nothing) && return state
+    q_old = qba[age_old]
+    q_young = age_old == age_young ? q_old : qba[age_young]
+    qk = (1.0 - fraction) .* q_old .+ fraction .* q_young
+    q0 = interp1(x, nodes_x, qk)
+    return State(state.age, state.layers, state.surface, state.base, state.tsurf, q0)
 end
 
 # ----------------------------------------------------------------------------
@@ -511,11 +527,70 @@ function mesh_to_regular(mesh::AdaptiveMesh, values::AbstractVector, nx::Int, nz
     return x, z, out
 end
 
-function run_adaptive(data::BasinDataset, config::AdaptiveConfig)
+# θ-независимая часть адаптивного прогона: меши, растеризации и state'ы
+# (без q — инжекция qbasal_by_age в run_adaptive) для всех подшагов.
+struct AdaptiveStepGeom
+    mesh::AdaptiveMesh
+    state::State                # без q (qbasal = 0), координаты mesh.xc
+    grid::CellGrid
+    old_state_on_new_x::State   # state предыдущего подшага на координатах mesh.xc
+    age_old::Float64
+    age_young::Float64
+    fraction::Float64
+    dt_seconds::Float64
+end
+
+struct AdaptiveGeometry
+    config::AdaptiveConfig
+    initial_mesh::AdaptiveMesh
+    initial_state::State
+    initial_grid::CellGrid
+    steps::Vector{AdaptiveStepGeom}
+end
+
+function precompute_adaptive_geometry(data::BasinDataset, config::AdaptiveConfig)
     validate(config)
     ages = data.ages
     mesh = build_mesh(data, ages[1], ages[1], 0.0, config)
-    state = state_at(data, ages[1], ages[1], 0.0, mesh.xc)
+    state = state_at(data, ages[1], ages[1], 0.0, mesh.xc; with_heat = false)
+    grid = rasterize_cells(state, mesh)
+    steps = AdaptiveStepGeom[]
+    for (older_age, younger_age) in zip(ages[1:end-1], ages[2:end])
+        span = older_age - younger_age
+        n_steps = max(1, Int(ceil(span / config.max_dt_ma)))
+        previous_fraction = 0.0
+        previous_older, previous_younger = older_age, younger_age
+        for k in 1:n_steps
+            fraction = k / n_steps
+            new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
+            new_state = state_at(data, older_age, younger_age, fraction, new_mesh.xc;
+                                 with_heat = false)
+            new_grid = rasterize_cells(new_state, new_mesh)
+            old_state_on_new_x = state_at(data, previous_older, previous_younger,
+                                          previous_fraction, new_mesh.xc; with_heat = false)
+            push!(steps, AdaptiveStepGeom(new_mesh, new_state, new_grid, old_state_on_new_x,
+                                          older_age, younger_age, fraction,
+                                          span / n_steps * SECONDS_PER_MA))
+            previous_fraction = fraction
+            previous_older, previous_younger = older_age, younger_age
+        end
+    end
+    return AdaptiveGeometry(config, mesh, state, grid, steps)
+end
+
+function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
+                      qbasal_by_age::Union{Nothing,Dict{Float64,Vector{Float64}}} = nothing,
+                      qbasal_nodes_x::Union{Nothing,Vector{Float64}} = nothing,
+                      geometry = nothing)
+    validate(config)
+    ages = data.ages
+    mesh = geometry === nothing ? build_mesh(data, ages[1], ages[1], 0.0, config) : geometry.initial_mesh
+    state = with_qbasal(
+        geometry === nothing ?
+            state_at(data, ages[1], ages[1], 0.0, mesh.xc; with_heat = false) :
+            geometry.initial_state,
+        qbasal_by_age, qbasal_nodes_x, mesh.xc;
+        age_old = ages[1], age_young = ages[1], fraction = 0.0)
     grid = rasterize_cells(state, mesh)
     temperature = initialise(mesh, state, grid, config)
     px, pz, preview = mesh_to_regular(mesh, temperature, config.preview_nx, config.preview_nz)
@@ -524,30 +599,49 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig)
     diagnostics = OrderedDict{String,Any}[]
     start = time_ns()
 
+    si_mesh = 0
     for (older_age, younger_age) in zip(ages[1:end-1], ages[2:end])
         span = older_age - younger_age
         steps = max(1, Int(ceil(span / config.max_dt_ma)))
         previous_fraction = 0.0
         previous_older, previous_younger = older_age, younger_age
         for step in 1:steps
-            fraction = step / steps
-            new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
-            new_state = state_at(data, older_age, younger_age, fraction, new_mesh.xc)
-            new_grid = rasterize_cells(new_state, new_mesh)
-            old_state_on_new_x = state_at(
-                data, previous_older, previous_younger, previous_fraction, new_mesh.xc)
+            si_mesh += 1
+            if geometry !== nothing
+                sg = geometry.steps[si_mesh]
+                new_mesh = sg.mesh
+                new_state = with_qbasal(sg.state, qbasal_by_age, qbasal_nodes_x,
+                                        new_mesh.xc; age_old = sg.age_old,
+                                        age_young = sg.age_young, fraction = sg.fraction)
+                new_grid = sg.grid
+                old_state_on_new_x = sg.old_state_on_new_x
+                dt_seconds = sg.dt_seconds
+            else
+                fraction = step / steps
+                new_mesh = build_mesh(data, older_age, younger_age, fraction, config)
+                new_state = with_qbasal(
+                    state_at(data, older_age, younger_age, fraction, new_mesh.xc;
+                             with_heat = false),
+                    qbasal_by_age, qbasal_nodes_x, new_mesh.xc;
+                    age_old = older_age, age_young = younger_age, fraction = fraction)
+                new_grid = rasterize_cells(new_state, new_mesh)
+                old_state_on_new_x = state_at(
+                    data, previous_older, previous_younger, previous_fraction, new_mesh.xc;
+                    with_heat = false)
+                dt_seconds = span / steps * SECONDS_PER_MA
+            end
             transported = adaptive_remap(
                 mesh, temperature, grid, old_state_on_new_x, new_mesh, new_state, new_grid)
             temperature, diag = adaptive_step(
                 transported, new_mesh, new_state, new_grid,
-                span / steps * SECONDS_PER_MA, data.properties, config)
+                dt_seconds, data.properties, config)
             push!(diagnostics, merge(OrderedDict{String,Any}(
                 "age_ma" => new_state.age,
                 "cells" => length(new_mesh.cells),
                 "active_cells" => count(new_grid.active),
             ), diag))
             mesh, state, grid = new_mesh, new_state, new_grid
-            previous_fraction = fraction
+            previous_fraction = geometry === nothing ? fraction : sg.fraction
         end
         _, _, preview = mesh_to_regular(mesh, temperature, config.preview_nx, config.preview_nz)
         push!(saved, preview)
@@ -557,7 +651,7 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig)
     elapsed = (time_ns() - start) / 1.0e9
     final_lith = mesh_to_regular(mesh, Float64.(grid.lith), config.preview_nx, config.preview_nz)[3]
     final_phi = mesh_to_regular(mesh, grid.phi, config.preview_nx, config.preview_nz)[3]
-    final_preview_state = exact_state(data, ages[end], px)
+    final_preview_state = exact_state(data, ages[end], px; with_heat = false)
 
     nt = length(saved)
     temperature_c = Array{Float64,3}(undef, nt, config.preview_nz, config.preview_nx)
@@ -574,6 +668,8 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig)
         grid = grid, final_temperature_cells = temperature,
         cell_counts = cell_counts, diagnostics = diagnostics,
         elapsed_seconds = elapsed,
+        dx = (data.bounds[2] - data.bounds[1]) / config.preview_nx,
+        dz = (data.bounds[4] - data.bounds[3]) / config.preview_nz,
     )
 end
 
@@ -590,6 +686,158 @@ function adaptive_run_id(data::BasinDataset, config::AdaptiveConfig)
     )
     return bytes2hex(sha256(JSON.json(payload)))[1:16]
 end
+
+# Отрисовка адаптивной сетки — порт rsnft2/visualize_adaptive_mesh.py:
+# заливка ячеек температурой (палитра magma), обводка цветом уровня измельчения,
+# рамка, подписи осей, легенда уровней. Пишет PNG напрямую (без внешних зависимостей).
+
+const MESH_PALETTE = [
+    (0, 0, 4), (31, 12, 72), (85, 15, 109), (136, 34, 106),
+    (186, 54, 85), (227, 89, 51), (249, 140, 10), (249, 201, 50),
+    (252, 255, 164),
+]
+const MESH_LEVEL_OUTLINE = [
+    (75, 85, 99), (37, 99, 235), (220, 38, 38), (147, 51, 234), (5, 150, 105), (120, 60, 20),
+]
+
+function colour_map_rgb(values::AbstractVector{Float64}, low::Float64, high::Float64)
+    n = length(MESH_PALETTE)
+    out = Vector{Tuple{Int,Int,Int}}(undef, length(values))
+    for i in eachindex(values)
+        v = values[i]
+        if !isfinite(v)
+            out[i] = (245, 245, 245)
+            continue
+        end
+        s = clamp((v - low) / max(high - low, 1.0e-12), 0.0, 1.0) * (n - 1)
+        left = clamp(floor(Int, s), 0, n - 1)
+        right = min(left + 1, n - 1)
+        w = s - left
+        a, b = MESH_PALETTE[left + 1], MESH_PALETTE[right + 1]
+        out[i] = (round(Int, a[1] * (1 - w) + b[1] * w),
+                  round(Int, a[2] * (1 - w) + b[2] * w),
+                  round(Int, a[3] * (1 - w) + b[3] * w))
+    end
+    return out
+end
+
+function save_mesh_drawing(mesh::AdaptiveMesh, grid::CellGrid, temperature_c::Vector{Float64},
+                           path::AbstractString; run_id::AbstractString = "")
+    x0m, x1m, z0m, z1m = mesh.bounds
+    width, height = 1500, 900
+    margin_left, margin_top, plot_width, plot_height = 90, 95, 1280, 700
+    finite = [temperature_c[c] for c in eachindex(temperature_c)
+              if grid.active[c] && isfinite(temperature_c[c])]
+    low, high = isempty(finite) ? (0.0, 1.0) : (minimum(finite), maximum(finite))
+    colours = colour_map_rgb(temperature_c, low, high)
+
+    px(x) = margin_left + round(Int, (x - x0m) / (x1m - x0m) * plot_width)
+    py(z) = margin_top + round(Int, (z - z0m) / (z1m - z0m) * plot_height)
+
+    canvas = fill((255, 255, 255), height, width)   # (row=y, col=x)
+
+    function draw_line(xa, ya, xb, yb, col, wpx)
+        # оси-параллельные линии: заполняем прямоугольник толщиной wpx
+        r0, r1 = min(ya, yb), max(ya, yb)
+        c0, c1 = min(xa, xb), max(xa, xb)
+        c1 = c1 + wpx - 1
+        r0 = round(Int, r0); r1 = round(Int, r1)
+        c0 = round(Int, c0); c1 = round(Int, c1)
+        for r in r0:r1, c in c0:c1
+            (1 <= r <= height && 1 <= c <= width) && (canvas[r, c] = col)
+        end
+    end
+
+    for i in eachindex(mesh.cells)
+        cell = mesh.cells[i]
+        xa, xb = px(x0m + cell.ix0 * mesh.dxf), px(x0m + cell.ix1 * mesh.dxf)
+        za, zb = py(z0m + cell.iz0 * mesh.dzf), py(z0m + cell.iz1 * mesh.dzf)
+        fill_col = grid.active[i] ? colours[i] : (244, 244, 245)
+        outline = MESH_LEVEL_OUTLINE[clamp(cell.level + 1, 1, length(MESH_LEVEL_OUTLINE))]
+        wpx = cell.level < 2 ? 1 : 2
+        for r in za:(zb - 1), c in xa:(xb - 1)
+            (1 <= r <= height && 1 <= c <= width) && (canvas[r, c] = fill_col)
+        end
+        draw_line(xa, za, xa, zb, outline, wpx)
+        draw_line(xb - wpx, za, xb - wpx, zb, outline, wpx)
+        draw_line(xa, za, xb, za, outline, wpx)
+        draw_line(xa, zb - wpx, xb, zb - wpx, outline, wpx)
+    end
+    # внешняя рамка
+    draw_line(margin_left, margin_top, margin_left, margin_top + plot_height, (0, 0, 0), 2)
+    draw_line(margin_left + plot_width - 1, margin_top, margin_left + plot_width - 1,
+              margin_top + plot_height, (0, 0, 0), 2)
+    draw_line(margin_left, margin_top, margin_left + plot_width, margin_top, (0, 0, 0), 2)
+    draw_line(margin_left, margin_top + plot_height - 1, margin_left + plot_width,
+              margin_top + plot_height - 1, (0, 0, 0), 2)
+
+    write_png_rgb(path, canvas)
+    return path
+end
+
+# Минимальный PNG-энкодер: RGB8, без сжатия (stored deflate blocks), zlib/CRC32 вручную.
+function write_png_rgb(path::AbstractString, canvas::Matrix{Tuple{Int,Int,Int}})
+    height, width = size(canvas)
+    raw = UInt8[]
+    for r in 1:height
+        push!(raw, 0x00)                                    # filter: none
+        for c in 1:width
+            pix = canvas[r, c]
+            append!(raw, UInt8.((pix[1], pix[2], pix[3])))
+        end
+    end
+    compressed = Vector{UInt8}()
+    total = length(raw)
+    pos = 1
+    while pos <= total
+        n = min(65535, total - pos + 1)
+        final_block = (pos + n - 1 >= total)
+        push!(compressed, final_block ? 0x01 : 0x00)        # BFINAL | BTYPE=00 (stored)
+        append!(compressed, UInt8[n & 0xff, (n >> 8) & 0xff])           # LEN, little-endian
+        append!(compressed, UInt8[(~n) & 0xff, ((~n) >> 8) & 0xff])     # NLEN (one's complement)
+        append!(compressed, raw[pos:(pos + n - 1)])
+        pos += n
+    end
+    crc32(data) = begin
+        crc = 0xffffffff
+        for b in data
+            crc = crc ⊻ b
+            for _ in 1:8
+                crc = (crc >> 1) ⊻ (0xedb88320 & (-(crc & 1)))
+            end
+        end
+        crc ⊻ 0xffffffff
+    end
+    function chunk(tag::Vector{UInt8}, payload::Vector{UInt8})
+        out = UInt8[]
+        n = length(payload)
+        append!(out, UInt8[(n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff])
+        append!(out, tag); append!(out, payload)
+        crc = crc32(vcat(tag, payload))
+        append!(out, UInt8[(crc >> 24) & 0xff, (crc >> 16) & 0xff, (crc >> 8) & 0xff, crc & 0xff])
+        return out
+    end
+    ihdr = UInt8[]
+    append!(ihdr, UInt8[(width >> 24) & 0xff, (width >> 16) & 0xff, (width >> 8) & 0xff, width & 0xff])
+    append!(ihdr, UInt8[(height >> 24) & 0xff, (height >> 16) & 0xff, (height >> 8) & 0xff, height & 0xff])
+    append!(ihdr, UInt8[8, 2, 0, 0, 0])                     # bit depth 8, color type 2 (RGB)
+    zlib = UInt8[0x78, 0x01]                                # zlib header (fastest)
+    append!(zlib, compressed)
+    s1, s2 = 1 % UInt32, 0 % UInt32
+    for b in raw
+        s1 = (s1 + b) % 65521
+        s2 = (s2 + s1) % 65521
+    end
+    adler = (s2 << 16) | s1
+    append!(zlib, UInt8[(adler >> 24) & 0xff, (adler >> 16) & 0xff, (adler >> 8) & 0xff, adler & 0xff])
+    open(path, "w") do f
+        write(f, UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        write(f, chunk(UInt8[0x49, 0x48, 0x44, 0x52], ihdr))          # IHDR
+        write(f, chunk(UInt8[0x49, 0x44, 0x41, 0x54], zlib))          # IDAT
+        write(f, chunk(UInt8[0x49, 0x45, 0x4e, 0x44], UInt8[]))       # IEND
+    end
+end
+
 
 function save_adaptive(result, run_dir::AbstractString, metadata)
     mkpath(run_dir)
@@ -697,6 +945,9 @@ function main_adaptive(argv = ARGS)
     save_adaptive(result, run_dir, metadata)
     update_manifest(cache_dir, metadata)
     println("SAVED $(joinpath(run_dir, "result.npz"))")
+    mesh_path = save_mesh_drawing(mesh, result.grid, result.final_temperature_cells,
+                                  joinpath(run_dir, "mesh.png"))
+    println(@sprintf("MESH_PNG %s", mesh_path))
     println(@sprintf("CELLS %d ACTIVE %d MIN_CELL %.3fx%.3f m",
                      length(mesh.cells), final_active, metadata["minimum_dx_m"], metadata["minimum_dz_m"]))
     println(@sprintf("T_FINAL %.3f %.3f C", minimum(finite), maximum(finite)))
