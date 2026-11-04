@@ -489,7 +489,7 @@ function adaptive_step(transported::Vector{Float64}, mesh::AdaptiveMesh, state::
         solution, last_linear_iterations, last_linear_residual = pcg_solve(
             diagonal, pp, qq, gg, rhs, trial[active];
             tolerance = config.linear_tolerance,
-            max_iterations = max(800, 6 * floor(Int, sqrt(length(diagonal)))),
+            max_iterations = max(2000, 60 * floor(Int, sqrt(length(diagonal)))),
         )
         updated = fill(NaN, length(trial))
         updated[active] = solution
