@@ -42,6 +42,7 @@ function parse_cli()
         "--max-dt-ma"     ; arg_type = Float64; default = 2.5; help = "solver max time step, Ma"
         "--picard-iters"  ; arg_type = Int; default = 3
         "--picard-tol"    ; arg_type = Float64; default = 1.0e-3
+        "--pcg-tol"       ; arg_type = Float64; default = 1.0e-8; help = "PCG relative tolerance"
         "--max-f-calls"   ; arg_type = Int; default = 0; help = "bound NM by J-evaluations (0 = unbounded)"
         "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
         "--out"           ; required = true
@@ -71,7 +72,8 @@ function main()
                            n_nodes = args["n-nodes"], mid_x = args["mid-x"])
     cfg = SolverConfig(nx = nx, nz = nz, max_dt_ma = args["max-dt-ma"],
                        picard_iterations = args["picard-iters"],
-                       picard_tolerance_c = args["picard-tol"])
+                       picard_tolerance_c = args["picard-tol"],
+                       pcg_tolerance = args["pcg-tol"])
 
     # воркеры: каждый со своим датасетом и кэшем
     if args["workers"] > 1 && nprocs() == 1
@@ -89,7 +91,8 @@ function main()
                              cache_dir = joinpath(out_dir, "cache_w$w"),
                              max_dt_ma = args["max-dt-ma"],
                              picard_iterations = args["picard-iters"],
-                             picard_tolerance_c = args["picard-tol"])
+                             picard_tolerance_c = args["picard-tol"],
+                             pcg_tolerance = args["pcg-tol"])
         end
     end
     cache_dir = joinpath(out_dir, "cache_main")

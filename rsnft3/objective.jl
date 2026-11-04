@@ -50,6 +50,7 @@ struct Objective
     cache::Dict{String,Vector{Float64}}    # key -> [J, J_T, J_Ro, J_reg]
     cache_path::String                     # "" — только в памяти
     evals::Base.RefValue{Int}
+    geometry::ForwardGeometry              # тета-независимая часть прогона
 end
 
 "Маска активных ячеек (nz, nx): ячейка накрыта хотя бы одним слоем на age 0."
@@ -120,8 +121,24 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
                 cache[k] = [Float64(v), NaN, NaN, NaN]   # старый формат (скаляр J)
         end
     end
+    geometry = precompute_geometry(data, cfg)
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
-                     t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0))
+                     t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0),
+                     geometry)
+end
+
+"θ → qbasal (Вт/м²) на x-сетке прогона для каждого возраста; эквивалент
+инъекции make_param_data + boundary_value (те же interp1 по nodes_x, ×1e-3)."
+function qbasal_by_age(layout::ThetaLayout, θ::AbstractVector{<:Real},
+                       x::AbstractVector, ages::Vector{Float64})
+    nn = length(layout.nodes_x)
+    out = Dict{Float64,Vector{Float64}}()
+    for age in ages
+        ie = epoch_index_of(layout, age)
+        q = [Float64(θ[(ie-1)*nn + ix]) for ix in 1:nn]
+        out[age] = interp1(x, layout.nodes_x, q) .* 1.0e-3
+    end
+    return out
 end
 
 n_targets(obj::Objective, kind::Symbol) =
@@ -153,8 +170,8 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     end
     t0 = time()
     obj.evals[] += 1
-    pdata = make_param_data(obj.data, obj.layout, θ)
-    result = run_forward(pdata, obj.cfg)
+    qba = qbasal_by_age(obj.layout, θ, obj.geometry.x, obj.data.ages)
+    result = run_forward(obj.data, obj.cfg; geometry = obj.geometry, qbasal_by_age = qba)
     xg, zg = result.x, result.z
     temp0 = result.temperature_c[end, :, :]          # (nz, nx), t = 0
 
