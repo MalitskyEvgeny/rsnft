@@ -75,7 +75,8 @@ end
 
 "Одна инверсия: DE по всему θ → NM-полировка по уровням эпох. f_eval(θ) -> J."
 function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool = true,
-                       seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false)
+                       seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
+                       max_f_calls::Int = 0)
     t0 = time()
     θde, Jde, de_evals = de_search(f_eval, layout; de_budget = de_budget, seed = seed, trace = trace)
     θ = collect(Float64.(θde))
@@ -94,6 +95,7 @@ function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool =
         res = Optim.optimize(fsub, layout.lower[idx], layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
                              Optim.Options(iterations = nm_iterations,
+                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : Inf,
                                            x_abstol = 1e-6, f_abstol = 1e-6))
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)
@@ -112,7 +114,8 @@ end
 "Инверсия в воркер-режиме: DE через worker_J на всех процессах; финальная
 оценка и NM-полировка — на главном (кэш воркеров сливается в главный)."
 function invert_workers(obj::Objective; de_budget::Int = 4000, multilevel::Bool = true,
-                        seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false)
+                        seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
+                        max_f_calls::Int = 0)
     nprocs() > 1 || return invert_local(obj; de_budget = de_budget, multilevel = multilevel,
                                         seed = seed, nm_iterations = nm_iterations, trace = trace)
     t0 = time()
@@ -133,6 +136,7 @@ function invert_workers(obj::Objective; de_budget::Int = 4000, multilevel::Bool 
         res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
                              Optim.Options(iterations = nm_iterations,
+                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : Inf,
                                            x_abstol = 1e-6, f_abstol = 1e-6))
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)
@@ -146,12 +150,13 @@ end
 "Ансамбль стартов; сортировка по J. Старты — последовательно, DE внутри — по воркерам."
 function invert_ensemble(obj::Objective; ensemble::Int = 4, de_budget::Int = 4000,
                          multilevel::Bool = true, seed0::Int = 1, nm_iterations::Int = 200,
-                         trace::Bool = false)
+                         trace::Bool = false, max_f_calls::Int = 0)
     mode = nprocs() > 1 ? invert_workers : invert_local
     results = InversionResult[]
     for s in 1:ensemble
         push!(results, mode(obj; de_budget = de_budget, multilevel = multilevel,
-                            seed = seed0 + s - 1, nm_iterations = nm_iterations, trace = trace))
+                            seed = seed0 + s - 1, nm_iterations = nm_iterations,
+                            trace = trace, max_f_calls = max_f_calls))
     end
     return sort!(results; by = r -> r.J)
 end
@@ -170,12 +175,16 @@ end
 "Полная инициализация воркера: данные + Objective (один remotecall)."
 function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{Tuple{Float64,Float64}},
                       n_nodes::Int, mid_x::Float64, nx::Int, nz::Int;
-                      reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "")
+                      reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "",
+                      max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
+                      picard_tolerance_c::Real = 1.0e-3)
     global INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT
     INV_DATA = load_dataset_derived(data_dir, Workbook())
     INV_LAYOUT = make_q_layout(INV_DATA; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x)
     INV_WELLS = wells
-    INV_CFG = SolverConfig(nx = nx, nz = nz)
+    INV_CFG = SolverConfig(nx = nx, nz = nz, max_dt_ma = Float64(max_dt_ma),
+                           picard_iterations = picard_iterations,
+                           picard_tolerance_c = Float64(picard_tolerance_c))
     worker_setup(INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT;
                  reg = reg, weight_ro = weight_ro, cache_dir = cache_dir)
     return myid()
@@ -184,7 +193,7 @@ end
 "Полировка без DE: NM по уровням эпох из заданного старта (иерархия сеток:
 DE на грубой, полировка на рабочей)."
 function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 200,
-                     multilevel::Bool = true)
+                     multilevel::Bool = true, max_f_calls::Int = 0)
     t0 = time()
     θ = collect(Float64.(θ0))
     length(θ) == length(obj.layout) || error("theta0 length mismatch")
@@ -203,6 +212,7 @@ function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 
         res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
                              Optim.Options(iterations = nm_iterations,
+                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : Inf,
                                            x_abstol = 1e-6, f_abstol = 1e-6))
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)

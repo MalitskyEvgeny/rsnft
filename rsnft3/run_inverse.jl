@@ -39,6 +39,10 @@ function parse_cli()
         "--epochs"        ; default = "200-100,100-35,35-10,10-0"
         "--no-multilevel" ; action = :store_true
         "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE; grid-hierarchy fallback)"
+        "--max-dt-ma"     ; arg_type = Float64; default = 2.5; help = "solver max time step, Ma"
+        "--picard-iters"  ; arg_type = Int; default = 3
+        "--picard-tol"    ; arg_type = Float64; default = 1.0e-3
+        "--max-f-calls"   ; arg_type = Int; default = 0; help = "bound NM by J-evaluations (0 = unbounded)"
         "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
         "--out"           ; required = true
     end
@@ -65,7 +69,9 @@ function main()
     wells = load_wells_multi(args["wells"], data; sigma_T = args["sigma-T"], sigma_Ro = args["sigma-Ro"])
     layout = make_q_layout(data; epochs = parse_epochs(args["epochs"]),
                            n_nodes = args["n-nodes"], mid_x = args["mid-x"])
-    cfg = SolverConfig(nx = nx, nz = nz)
+    cfg = SolverConfig(nx = nx, nz = nz, max_dt_ma = args["max-dt-ma"],
+                       picard_iterations = args["picard-iters"],
+                       picard_tolerance_c = args["picard-tol"])
 
     # воркеры: каждый со своим датасетом и кэшем
     if args["workers"] > 1 && nprocs() == 1
@@ -80,7 +86,10 @@ function main()
             remotecall_fetch(worker_init!, w, data_dir_abs, wells, epochs,
                              args["n-nodes"], args["mid-x"], nx, nz;
                              reg = args["reg"], weight_ro = args["weight-ro"],
-                             cache_dir = joinpath(out_dir, "cache_w$w"))
+                             cache_dir = joinpath(out_dir, "cache_w$w"),
+                             max_dt_ma = args["max-dt-ma"],
+                             picard_iterations = args["picard-iters"],
+                             picard_tolerance_c = args["picard-tol"])
         end
     end
     cache_dir = joinpath(out_dir, "cache_main")
@@ -109,12 +118,14 @@ function main()
         theta0 = Float64.(src["best"]["theta"])
         println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
         best = polish_from(obj, theta0; nm_iterations = args["nm-iterations"],
-                           multilevel = !args["no-multilevel"])
+                           multilevel = !args["no-multilevel"],
+                           max_f_calls = args["max-f-calls"])
         results = [best]
     else
         results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
                                   multilevel = !args["no-multilevel"], seed0 = args["seed"],
-                                  nm_iterations = args["nm-iterations"])
+                                  nm_iterations = args["nm-iterations"],
+                                  max_f_calls = args["max-f-calls"])
         best = first(results)
     end
 
