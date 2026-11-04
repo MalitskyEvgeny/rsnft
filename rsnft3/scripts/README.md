@@ -1,7 +1,16 @@
-# run_adaptive.ps1 — запуск адаптивного расчёта одной командой
+# run_adaptive — запуск адаптивного расчёта одной командой
 
-Обёртка над `run_inverse.jl` (адаптивный бэкенд) + `report_inverse.jl`.
-После прогона печатает приёмочные метрики из `solution.json` и пути артефактов.
+Два эквивалентных скрипта-обёртки над `run_inverse.jl` (адаптивный бэкенд) +
+`report_inverse.jl`:
+
+| Скрипт | Платформа |
+|---|---|
+| `run_adaptive.ps1` | Windows PowerShell (5.1+) |
+| `run_adaptive.sh` | Linux / macOS / любой POSIX shell (bash) |
+
+После прогона печатается сводка приёмочных метрик из `solution.json` и пути артефактов.
+Параметры у обоих совпадают (см. таблицу ниже); отличаются только имена флагов:
+PowerShell `-Grid 30,60` ↔ bash `--grid 30,60`.
 
 ## Быстрый старт
 
@@ -32,6 +41,11 @@ powershell -ExecutionPolicy Bypass -File .\rsnft3\scripts\run_adaptive.ps1
 | `-Mode search` | весь конвейер на адаптивной сетке (`--adaptive-search`), равномерная сетка не используется |
 
 ## Основные параметры
+
+Имена — в формате PowerShell; в bash те же имена с `--` и дефисами:
+`-Grid` ↔ `--grid`, `-AdaptiveBase` ↔ `--adaptive-base`, `-SigmaT` ↔ `--sigma-T`,
+`-MaxDtMa` ↔ `--max-dt-ma`, `-PcgTol` ↔ `--pcg-tol`, `-NoReport` ↔ `--no-report`,
+`-FrozenMesh` ↔ `--frozen-mesh` и т.д.
 
 | Параметр | По умолчанию | Смысл |
 |---|---|---|
@@ -95,11 +109,13 @@ total    : 00:03:12
 
 ## Замечания
 
-- Каталог данных по умолчанию: `<repo>\Данные для обратной задачи`; колодцы —
+- Каталог данных по умолчанию: `<repo>/Данные для обратной задачи`; колодцы —
   `TemperatureWellData.xlsx;VitriniteWellData.xlsx`. Переопределяется `-DataDir` / `-Wells`.
 - Скрипт проверяет наличие `rsnft3/Project.toml`, `julia` на PATH, каталога данных и
   `-Theta0File` до запуска; ненулевой код возврата Julia прерывает выполнение.
-- Дробные параметры передаются в Julia через InvariantCulture — безопасно при любой
-  региональной настройке Windows (запятая/точка).
+- Дробные параметры передаются в Julia через InvariantCulture (ps1) / как есть (sh) —
+  скрипты безопасны при любой региональной настройке.
 - `results/` в `.gitignore`: выводы фиксируйте текстом коммитов, а не файлами.
-- Скрипт не пушит и не коммитит ничего сам.
+- Скрипты не пушат и не коммитят ничего сами.
+- В Windows Git-Bash запускать не рекомендуется: Julia-бинарник Windows не понимает
+  `/c/...`-пути; на Windows используйте `run_adaptive.ps1`, на Linux — `run_adaptive.sh`.
