@@ -105,12 +105,23 @@ function make_q_layout(data;
                            [(200.0, 100.0), (100.0, 35.0), (35.0, 10.0), (10.0, 0.0)],
                        n_nodes::Int = 3,
                        mid_x::Float64 = 23400.0,
-                       q_box::Tuple{Float64,Float64} = (30.0, 120.0))
+                       q_box::Tuple{Float64,Float64} = (30.0, 120.0),
+                       nodes_x::Union{Nothing,Vector{Float64}} = nothing)
     bounds = bounds_of(data)
     xmin, xmax = Float64(bounds[1]), Float64(bounds[2])
-    nodes = n_nodes == 2 ? [xmin, xmax] :
-            n_nodes == 3 ? [xmin, clamp(mid_x, xmin, xmax), xmax] :
-            error("n_nodes must be 2 or 3")
+    nodes = if nodes_x !== nothing
+        isempty(nodes_x) && error("nodes_x must not be empty")
+        ns = sort(unique(clamp.(Float64.(nodes_x), xmin, xmax)))
+        ns[1] == xmin || pushfirst!(ns, xmin)
+        ns[end] == xmax || push!(ns, xmax)
+        ns
+    elseif n_nodes == 2
+        [xmin, xmax]
+    elseif n_nodes == 3
+        [xmin, clamp(mid_x, xmin, xmax), xmax]
+    else
+        error("n_nodes must be 2 or 3 (or pass nodes_x)")
+    end
     names = String[]; lower = Float64[]; upper = Float64[]; x0 = Float64[]
     for epoch in epochs
         for x in nodes

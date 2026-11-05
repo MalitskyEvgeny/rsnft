@@ -177,10 +177,12 @@ function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{T
                       n_nodes::Int, mid_x::Float64, nx::Int, nz::Int;
                       reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "",
                       max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
-                      picard_tolerance_c::Real = 1.0e-3, pcg_tolerance::Real = 1.0e-8)
+                      picard_tolerance_c::Real = 1.0e-3, pcg_tolerance::Real = 1.0e-8,
+                      nodes_x::Union{Nothing,Vector{Float64}} = nothing)
     global INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT
     INV_DATA = load_dataset_derived(data_dir, Workbook())
-    INV_LAYOUT = make_q_layout(INV_DATA; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x)
+    INV_LAYOUT = make_q_layout(INV_DATA; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x,
+                               nodes_x = nodes_x)
     INV_WELLS = wells
     INV_CFG = SolverConfig(nx = nx, nz = nz, max_dt_ma = Float64(max_dt_ma),
                            picard_iterations = picard_iterations,

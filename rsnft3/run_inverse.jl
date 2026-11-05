@@ -36,6 +36,7 @@ function parse_cli()
         "--weight-ro"     ; arg_type = Float64; default = 1.0
         "--n-nodes"       ; arg_type = Int; default = 3; help = "X-nodes of q: 2 or 3"
         "--mid-x"         ; arg_type = Float64; default = 23400.0
+        "--node-xs"       ; default = ""; help = "comma X-nodes of q in meters, e.g. 0,7000,23400,40000 (overrides --n-nodes/--mid-x)"
         "--epochs"        ; default = "200-100,100-35,35-10,10-0"
         "--no-multilevel" ; action = :store_true
         "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE; grid-hierarchy fallback)"
@@ -74,8 +75,11 @@ function main()
 
     data = load_dataset_derived(args["data-dir"], Workbook())
     wells = load_wells_multi(args["wells"], data; sigma_T = args["sigma-T"], sigma_Ro = args["sigma-Ro"])
+    node_xs = isempty(args["node-xs"]) ? nothing :
+              Float64.(parse.(Float64, split(args["node-xs"], ",")))
     layout = make_q_layout(data; epochs = parse_epochs(args["epochs"]),
-                           n_nodes = args["n-nodes"], mid_x = args["mid-x"])
+                           n_nodes = args["n-nodes"], mid_x = args["mid-x"],
+                           nodes_x = node_xs)
     cfg = SolverConfig(nx = nx, nz = nz, max_dt_ma = args["max-dt-ma"],
                        picard_iterations = args["picard-iters"],
                        picard_tolerance_c = args["picard-tol"],
@@ -98,7 +102,8 @@ function main()
                              max_dt_ma = args["max-dt-ma"],
                              picard_iterations = args["picard-iters"],
                              picard_tolerance_c = args["picard-tol"],
-                             pcg_tolerance = args["pcg-tol"])
+                             pcg_tolerance = args["pcg-tol"],
+                             nodes_x = node_xs)
         end
     end
     cache_dir = joinpath(out_dir, "cache_main")
