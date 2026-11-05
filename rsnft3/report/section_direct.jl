@@ -61,8 +61,17 @@ function section_direct(io::IOBuffer, dd::DirectData)
     # --- сводка прогона
     solver = get(dd.meta, "solver", Dict{String,Any}())
     println(io, "<h3>Сводка прогона</h3><div class=\"cards\">")
+    if haskey(solver, "base_nx")
+        # adaptive-прогон: quadtree-меш
+        _metric(io, "Сетка (adaptive)",
+                "base $(solver["base_nx"]) × $(solver["base_nz"]), level $(solver["max_level"]) · " *
+                "$(Int(get(dd.meta, "final_cells", 0))) ячеек ($(Int(get(dd.meta, "final_active_cells", 0))) активных)")
+        _metric(io, "Мин. ячейка, м",
+                "$(fmt(get(dd.meta, "minimum_dx_m", NaN), d = 1)) × $(fmt(get(dd.meta, "minimum_dz_m", NaN), d = 1))")
+    else
     _metric(io, "Сетка", "$(get(solver, "nx", "—")) × $(get(solver, "nz", "—"))")
     _metric(io, "Шаги, м", "x≈$(fmt(get(dd.meta, "dx_m", NaN), d = 0)), z≈$(fmt(get(dd.meta, "dz_m", NaN), d = 0))")
+    end
     _metric(io, "Расчёт, с", fmt(get(dd.meta, "elapsed_seconds", NaN), d = 1))
     _metric(io, "T финальная", "$(fmt(get(dd.meta, "final_temperature_min_c", NaN), d = 1)) … $(fmt(get(dd.meta, "final_temperature_max_c", NaN), d = 1)) °C")
     _metric(io, "Δt ≤, Ма", fmt(get(solver, "max_dt_ma", NaN), d = 1))
