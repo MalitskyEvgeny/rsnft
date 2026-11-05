@@ -235,7 +235,7 @@ function _grid_section(io::IOBuffer, dd::DirectData)
     if isfile(mesh_png)
         b64 = Base64.base64encode(read(mesh_png))
         println(io, "<div><p class=\"small\">Адаптивная сетка финального шага ",
-                "(mesh_adaptive.png):</p>",
+                "(", basename(mesh_png), "):</p>",
                 "<img src=\"data:image/png;base64,", b64,
                 "\" style=\"max-width:100%;height:auto;border:1px solid var(--border);",
                 "border-radius:8px\" alt=\"adaptive mesh\"></div>")
