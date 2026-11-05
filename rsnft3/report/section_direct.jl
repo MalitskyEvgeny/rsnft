@@ -81,7 +81,7 @@ function section_direct(io::IOBuffer, dd::DirectData)
                                      "currentvalue" => Dict("prefix" => "Эпоха: ", "suffix" => " Ма"),
                                      "pad" => Dict("t" => 30), "steps" => steps)],
                   "transition" => Dict("duration" => 0))
-    plot_div(io, "direct-temp", data, layout; frames = frames, height = 520)
+    plot_div(io, "direct-temp", data, layout; frames = frames, height = 520, width = 1140)
 
     # --- температура по глубине в нескольких колонках
     println(io, "<h3>Термические профили по колонкам</h3>")
@@ -125,7 +125,7 @@ function _depth_profiles(io::IOBuffer, dd::DirectData, xkm, zkm)
                       "xaxis" => Dict("title" => "T, °C"),
                       "yaxis" => Dict("title" => "Глубина, км", "autorange" => "reversed"),
                       "legend" => Dict("orientation" => "h", "y" => -0.2))
-        plot_div(io, "direct-col-$i", traces, layout; height = 380)
+        plot_div(io, "direct-col-$i", traces, layout; height = 380, width = 555)
     end
 end
 
@@ -142,7 +142,7 @@ function _geometry(io::IOBuffer, dd::DirectData, xkm)
                   "xaxis" => Dict("title" => "X, км"),
                   "yaxis" => Dict("title" => "Глубина, км", "autorange" => "reversed"),
                   "legend" => Dict("orientation" => "h", "y" => -0.2))
-    plot_div(io, "direct-geometry", traces, layout; height = 380)
+    plot_div(io, "direct-geometry", traces, layout; height = 380, width = 555)
 end
 
 function _stratigraphy(io::IOBuffer, dd::DirectData, xkm, zkm)
@@ -170,7 +170,7 @@ function _stratigraphy(io::IOBuffer, dd::DirectData, xkm, zkm)
                                           "tickvals" => codes,
                                           "ticktext" => [get(LITHO_NAMES, c, "код $c") for c in codes],
                                           "len" => 0.9)))
-    plot_div(io, "direct-litho", trace, layout; height = 380)
+    plot_div(io, "direct-litho", trace, layout; height = 380, width = 555)
 end
 
 function _porosity(io::IOBuffer, dd::DirectData, xkm, zkm)
@@ -182,5 +182,5 @@ function _porosity(io::IOBuffer, dd::DirectData, xkm, zkm)
                  "hovertemplate" => "x: %{x:.1f} км<br>z: %{y:.2f} км<br>φ: %{z:.3f}<extra></extra>")
     layout = Dict("xaxis" => Dict("title" => "X, км"),
                   "yaxis" => Dict("title" => "Глубина, км", "autorange" => "reversed"))
-    plot_div(io, "direct-poro", trace, layout; height = 400)
+    plot_div(io, "direct-poro", trace, layout; height = 400, width = 1140)
 end

@@ -41,7 +41,7 @@ td:first-child, th:first-child { text-align: left; }
        border-radius: 8px; padding: 10px 16px; min-width: 150px; }
 .metric .v { font-size: 1.45em; font-weight: 700; color: var(--accent); }
 .metric .l { font-size: .82em; color: var(--muted); }
-.plot { width: 100%; margin: 10px 0; }
+.plot { margin: 10px 0; overflow: hidden; }
 .plot-wide { width: 100%; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
        gap: 10px; }
@@ -78,16 +78,20 @@ json_safe(d::AbstractDict) =
 "Div с графиком Plotly: данные/layout — Dict, сериализуются через JSON."
 function plot_div(io::IOBuffer, id::String, data::Union{AbstractDict,AbstractVector},
                   layout::AbstractDict; frames::Union{Nothing,AbstractVector} = nothing,
-                  height::Int = 460)
+                  height::Int = 460, width::Union{Nothing,Int} = nothing)
     l = Dict{String,Any}(layout)
     l["margin"] = get(layout, "margin", Dict("l" => 60, "r" => 25, "t" => 40, "b" => 45))
     l["height"] = height
-    l["autosize"] = true
+    # ширина зафиксирована: autosize внутри grid-колонок меряет неверно,
+    # график рисуется поверх соседних блоков
+    l["width"] = width === nothing ? 1140 : width
+    l["autosize"] = false
     l["paper_bgcolor"] = "rgba(0,0,0,0)"
     l["plot_bgcolor"] = "rgba(0,0,0,0)"
     l["font"] = merge(Dict("family" => "'Segoe UI', Arial, sans-serif", "size" => 13,
                            "color" => "#1c2733"), get(layout, "font", Dict()))
-    println(io, "<div id=\"", id, "\" class=\"plot\"></div>")
+    println(io, "<div id=\"", id, "\" class=\"plot\" style=\"height:", height + 30,
+            "px; width:", l["width"], "px; max-width:100%\"></div>")
     print(io, "<script>Plotly.newPlot('", id, "', ")
     # трейсы всегда массивом: одиночный объект Plotly молча не рисует
     if data isa AbstractDict
@@ -97,6 +101,7 @@ function plot_div(io::IOBuffer, id::String, data::Union{AbstractDict,AbstractVec
     end
     print(io, ", ")
     JSON.print(io, json_safe(l))
+    print(io, ", {responsive: false, displaylogo: false}")
     if frames !== nothing
         print(io, ").then(function(gd){Plotly.addFrames(gd,")
         JSON.print(io, json_safe(frames))

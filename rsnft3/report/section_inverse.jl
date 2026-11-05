@@ -95,7 +95,7 @@ function _theta_section(io::IOBuffer, iv::InverseData)
                  "hovertemplate" => "x: %{x:.1f} км<br>эпоха: %{y}<br>q: %{z:.1f} мВт/м²<extra></extra>")
     plot_div(io, "inv-theta", trace,
              Dict("xaxis" => Dict("title" => "X, км"),
-                  "yaxis" => Dict("title" => "Эпоха")); height = 340)
+                  "yaxis" => Dict("title" => "Эпоха")); height = 340, width = 555)
 
     rows = join(("<tr><td>" * esc(n) * "</td><td>" * fmt(theta[i]; d = 1) *
                  "</td><td>" * fmt(layout["lower"][i]; d = 0) *
@@ -124,7 +124,7 @@ function _ensemble_scatter(io::IOBuffer, iv::InverseData)
                   "title" => "Вклад в функционал по стартам",
                   "xaxis" => Dict("title" => "Старт ансамбля"),
                   "yaxis" => Dict("title" => "Значение", "type" => "log"),
-                  "legend" => Dict("orientation" => "h", "y" => -0.25)); height = 340)
+                  "legend" => Dict("orientation" => "h", "y" => -0.25)); height = 340, width = 1140)
 end
 
 function _ensemble_table(io::IOBuffer, iv::InverseData)
@@ -218,7 +218,7 @@ function _profile_plot(io::IOBuffer, kind::String, w::String,
                                   "range" => [minimum(vals) - pad, maximum(vals) + pad]),
                   "yaxis" => Dict("title" => "Глубина, км", "autorange" => "reversed"),
                   "legend" => Dict("orientation" => "h", "y" => -0.2),
-                  "showlegend" => false); height = 330)
+                  "showlegend" => false); height = 330, width = 555)
 end
 
 function _settings_block(io::IOBuffer, iv::InverseData)
