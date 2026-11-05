@@ -21,8 +21,14 @@ function bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::Abstract
     j0 = clamp(floor(Int, uz) + 1, 1, nz); j1 = clamp(j0 + 1, 1, nz)
     tx = clamp(ux - (i0 - 1), 0.0, 1.0); tz = clamp(uz - (j0 - 1), 0.0, 1.0)
     v00 = field[j0, i0]; v10 = field[j0, i1]; v01 = field[j1, i0]; v11 = field[j1, i1]
-    (isfinite(v00) && isfinite(v10) && isfinite(v01) && isfinite(v11)) || return NaN
-    return (1-tx)*(1-tz)*v00 + tx*(1-tz)*v10 + (1-tx)*tz*v01 + tx*tz*v11
+    # Масочная интерполяция: неактивные (NaN) углы исключаются с перенормировкой
+    # весов — точки у края сетки / тонкого осадочного клина не выпадают в NaN.
+    num = 0.0; den = 0.0
+    for (v, w) in ((v00, (1-tx)*(1-tz)), (v10, tx*(1-tz)), (v01, (1-tx)*tz), (v11, tx*tz))
+        isfinite(v) || continue
+        num += w * v; den += w
+    end
+    den > 0.0 ? num / den : NaN
 end
 
 struct TTarget
