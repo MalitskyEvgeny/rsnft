@@ -12,6 +12,7 @@ using JSON
 using NPZ
 using Printf
 using Dates
+using Base64
 
 include(joinpath(@__DIR__, "report", "html.jl"))
 include(joinpath(@__DIR__, "report", "plotly_assets.jl"))

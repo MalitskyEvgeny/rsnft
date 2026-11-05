@@ -231,8 +231,9 @@ function _grid_section(io::IOBuffer, dd::DirectData)
     plot_div(io, "direct-grid", trace, layout; height = 380, width = 555)
 
     mesh_png = joinpath(REPORT_RUN_DIR_REF[], "mesh_adaptive.png")
+    isfile(mesh_png) || (mesh_png = joinpath(REPORT_RUN_DIR_REF[], "mesh.png"))
     if isfile(mesh_png)
-        b64 = base64encode(read(mesh_png))
+        b64 = Base64.base64encode(read(mesh_png))
         println(io, "<div><p class=\"small\">Адаптивная сетка финального шага ",
                 "(mesh_adaptive.png):</p>",
                 "<img src=\"data:image/png;base64,", b64,
