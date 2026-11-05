@@ -151,8 +151,11 @@ function _stratigraphy(io::IOBuffer, dd::DirectData, xkm, zkm)
     positions = [(c - minimum(codes)) / max(maximum(codes) - minimum(codes), 1) for c in codes]
     colorscale = Any[]
     for (p, c) in zip(positions, codes)
-        push!(colorscale, [p, litho_color(c)])
-        push!(colorscale, [p + 1 / (2n), litho_color(c)])
+        # дискретные полосы, позиции зажаты в [0, 1]: Plotly отвергает цвета вне диапазона
+        lo = clamp(p - 0.5 / n, 0.0, 1.0)
+        hi = clamp(p + 0.5 / n, 0.0, 1.0)
+        push!(colorscale, [lo, litho_color(c)])
+        push!(colorscale, [hi, litho_color(c)])
     end
     sort!(colorscale, by = first)
     trace = Dict("type" => "heatmap", "x" => xkm, "y" => zkm,
@@ -174,10 +177,10 @@ function _porosity(io::IOBuffer, dd::DirectData, xkm, zkm)
     finite = filter(isfinite, dd.porosity)
     trace = Dict("type" => "heatmap", "x" => xkm, "y" => zkm,
                  "z" => dd.porosity, "colorscale" => "Blues",
+                 "zmin" => 0.0, "zmax" => maximum(finite),
                  "colorbar" => Dict("title" => Dict("text" => "φ", "side" => "right")),
                  "hovertemplate" => "x: %{x:.1f} км<br>z: %{y:.2f} км<br>φ: %{z:.3f}<extra></extra>")
     layout = Dict("xaxis" => Dict("title" => "X, км"),
-                  "yaxis" => Dict("title" => "Глубина, км", "autorange" => "reversed"),
-                  "zmin" => 0.0, "zmax" => maximum(finite))
+                  "yaxis" => Dict("title" => "Глубина, км", "autorange" => "reversed"))
     plot_div(io, "direct-poro", trace, layout; height = 400)
 end

@@ -57,10 +57,8 @@ function section_inverse(io::IOBuffer, iv::InverseData)
     println(io, "</div>")
 
     _theta_section(io, iv)
-    println(io, "<div class=\"grid2\">")
     _ensemble_scatter(io, iv)
     _ensemble_table(io, iv)
-    println(io, "</div>")
     _well_profiles(io, iv)
     _settings_block(io, iv)
     println(io, "</section>")
@@ -99,9 +97,9 @@ function _theta_section(io::IOBuffer, iv::InverseData)
              Dict("xaxis" => Dict("title" => "X, км"),
                   "yaxis" => Dict("title" => "Эпоха")); height = 340)
 
-    rows = join(["<tr><td>", esc(n), "</td><td>", fmt(theta[i]; d = 1),
-                 "</td><td>", fmt(layout["lower"][i]; d = 0),
-                 "</td><td>", fmt(layout["upper"][i]; d = 0), "</td></tr>"]
+    rows = join(("<tr><td>" * esc(n) * "</td><td>" * fmt(theta[i]; d = 1) *
+                 "</td><td>" * fmt(layout["lower"][i]; d = 0) *
+                 "</td><td>" * fmt(layout["upper"][i]; d = 0) * "</td></tr>")
                 for (i, n) in enumerate(layout["names"]))
     println(io, "<div><table><tr><th>Параметр</th><th>θ̂, мВт/м²</th><th>мин</th><th>макс</th></tr>",
             rows, "</table></div>")
@@ -133,10 +131,10 @@ function _ensemble_table(io::IOBuffer, iv::InverseData)
     ens = iv.sol["ensemble"]
     names = iv.sol["layout"]["names"]
     th = hcat([Vector{Float64}(e["theta"]) for e in ens]...)
-    rows = join(["<tr><td>", esc(n), "</td><td>", fmt(mean(th[i, :]); d = 1),
-                 "</td><td>", fmt(std(th[i, :]); d = 1),
-                 "</td><td>", fmt(minimum(th[i, :]); d = 1),
-                 "</td><td>", fmt(maximum(th[i, :]); d = 1), "</td></tr>"]
+    rows = join(("<tr><td>" * esc(n) * "</td><td>" * fmt(mean(th[i, :]); d = 1) *
+                 "</td><td>" * fmt(std(th[i, :]); d = 1) *
+                 "</td><td>" * fmt(minimum(th[i, :]); d = 1) *
+                 "</td><td>" * fmt(maximum(th[i, :]); d = 1) * "</td></tr>")
                 for (i, n) in enumerate(names))
     println(io, "<div><p class=\"small\">Разброс ансамбля (невзаимозаменяемость решения)</p>",
             "<table><tr><th>Параметр</th><th>среднее</th><th>std</th><th>мин</th><th>макс</th></tr>",

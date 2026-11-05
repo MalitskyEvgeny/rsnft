@@ -45,6 +45,7 @@ td:first-child, th:first-child { text-align: left; }
 .plot-wide { width: 100%; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
        gap: 10px; }
+.grid2 > * { min-width: 0; }
 .small { color: var(--muted); font-size: .88em; }
 footer { text-align: center; color: var(--muted); font-size: .85em;
        padding: 1.5em 0 2.5em; }
@@ -88,7 +89,12 @@ function plot_div(io::IOBuffer, id::String, data::Union{AbstractDict,AbstractVec
                            "color" => "#1c2733"), get(layout, "font", Dict()))
     println(io, "<div id=\"", id, "\" class=\"plot\"></div>")
     print(io, "<script>Plotly.newPlot('", id, "', ")
-    JSON.print(io, json_safe(data))
+    # трейсы всегда массивом: одиночный объект Plotly молча не рисует
+    if data isa AbstractDict
+        JSON.print(io, [json_safe(data)])
+    else
+        JSON.print(io, json_safe(data))
+    end
     print(io, ", ")
     JSON.print(io, json_safe(l))
     if frames !== nothing
