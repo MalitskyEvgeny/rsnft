@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Обратная задача rsnft3: инструкция</title>
+<style>
+:root { --ink:#1a1f2e; --mut:#5a6478; --acc:#2563eb; --bg:#f7f8fb; --card:#fff; --line:#e3e7ef; --ok:#16a34a; --warn:#dc2626; }
+* { box-sizing:border-box; }
+body { font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink); background:var(--bg); margin:0; line-height:1.6; }
+.wrap { max-width:1080px; margin:0 auto; padding:32px 24px 80px; }
+h1 { font-size:2rem; border-bottom:3px solid var(--acc); padding-bottom:10px; }
+h2 { font-size:1.4rem; margin-top:2.4em; border-left:4px solid var(--acc); padding-left:12px; }
+h3 { font-size:1.1rem; margin-top:1.8em; }
+code { background:#eef1f6; padding:1px 6px; border-radius:4px; font-size:.92em; font-family:Consolas,monospace; }
+pre { background:#151a26; color:#dce3f0; padding:14px 18px; border-radius:8px; overflow-x:auto; font-size:.88em; line-height:1.5; }
+pre code { background:none; padding:0; color:inherit; }
+pre .c { color:#7c8aa5; }
+table { border-collapse:collapse; width:100%; margin:14px 0; background:var(--card); font-size:.93em; }
+th,td { border:1px solid var(--line); padding:7px 11px; text-align:left; vertical-align:top; }
+th { background:#eef2fa; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 20px; margin:14px 0; }
+.warn { border-left:4px solid var(--warn); background:#fff5f5; }
+.ok { border-left:4px solid var(--ok); background:#f2fbf5; }
+.note { color:var(--mut); font-size:.92em; }
+.toc { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 24px; }
+.toc a { color:var(--acc); text-decoration:none; }
+.toc a:hover { text-decoration:underline; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+@media (max-width:820px){ .grid2{grid-template-columns:1fr;} }
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>Обратная задача rsnft3 — подробная инструкция</h1>
+<p class="note">Восстановление базового теплового потока q(x,&thinsp;t) по наблюдениям температуры и отражательной способности витринита в скважинах. Ветка: dev-adaptive-only (актуально и для dev-inverse).</p>
+
+<div class="toc">
+<b>Содержание</b>
+<ol>
+<li><a href="#phys">Физическая постановка и что мы ищем</a></li>
+<li><a href="#pipe">Как устроено вычисление (конвейер)</a></li>
+<li><a href="#run">Как запускать: сценарии</a></li>
+<li><a href="#out">Результаты: файлы и их структура</a></li>
+<li><a href="#interp">Как интерпретировать критерии</a></li>
+<li><a href="#mesh">Картинки адаптивной сетки</a></li>
+<li><a href="#speed">Скорость и ручки ускорения</a></li>
+<li><a href="#adaptive">Адаптивная сетка: когда применять</a></li>
+<li><a href="#traps">Грабли</a></li>
+</ol>
+</div>
+
+<h2 id="phys">1. Физическая постановка и что мы ищем</h2>
+<p>Прямая задача — осадочный бассейн: стратиграфия из XLSX-фактуры (слои с границами top/bot и литологией на сетке возрастов 200&ndash;0 Ma), уплотнение (Sekiguchi), теплопроводность и теплоёмкость от литологии и пористости, стационарное на каждом подшаге уравнение теплопроводности (PCG), захоронение частиц и кинетика EASY%Ro (Аррениус: F = &Sigma; f<sub>i</sub>(1&minus;e<sup>&minus;I<sub>i</sub></sup>), Ro = exp(&minus;1.6 + 3.7&thinsp;F) — исправленная формула (14)).</p>
+<p><b>Неизвестный параметр &theta;</b> — базовый тепловой поток q(x,&thinsp;t), дискретизованный по эпохам &times; X-узлам:</p>
+<ul>
+<li>эпохи по умолчанию: 200&ndash;100, 100&ndash;35, 35&ndash;10, 10&ndash;0 Ma (4 эпохи, флаг <code>--epochs</code>);</li>
+<li>X-узлы: границы профиля + средний узел <code>--mid-x</code> (23 400 м) при <code>--n-nodes 3</code>; q(x) внутри эпохи — кусочно-линейная по узлам;</li>
+<li>итого dim(&theta;) = 4 &times; 3 = <b>12</b> значений мВт/м², бокс [30,&thinsp;120];</li>
+<li>индексация: (эпоха&minus;1)&times;n_nodes + номер узла.</li>
+</ul>
+<p>Наблюдения: T в точках скважин (TemperatureWellData.xlsx, &sigma;<sub>T</sub> = 2 &deg;C) и Ro (VitriniteWellData.xlsx, &sigma;<sub>Ro</sub> = 0.05). Цель — минимизировать</p>
+<pre><code>J(&theta;) = J_T + w_Ro·J_Ro + reg·J_reg
+J_T  = &Sigma; ((T_calc &minus; T_obs)/&sigma;_T)²        — невязки температуры
+J_Ro = &Sigma; ((Ro_calc &minus; Ro_obs)/&sigma;_Ro)²    — невязки отражательной способности
+J_reg — штраф на негладкость q(x,t) между соседними узлами/эпохами</code></pre>
+
+<h2 id="pipe">2. Как устроено вычисление (конвейер)</h2>
+<pre><code>parameterized_data.jl   ThetaLayout, make_param_data: &theta; -&gt; синтетический heat-Workbook
+ro_kinetics.jl          EASY%Ro поверх прогона прямой задачи
+observations.jl         WellPoint/WellSet: XLSX организаторов и twin-JSON
+objective.jl            J(&theta;): прогон прямой задачи -&gt; невязки в точках скважин (+кэш по &theta;)
+criteria.jl             RMSE по скважинам, доли точек в &sigma;/2&sigma;, E^L2
+invert.jl               DE (BlackBoxOptim) -&gt; многоуровневая NM-полировка (по эпохам) -&gt; ансамбль
+run_inverse.jl          CLI-точка входа: &lt;run_dir&gt;/solution.json + result.npz
+make_twin.jl            синтетические наблюдения из известного &theta;_true (проверка метода)
+report_inverse.jl       самодостаточный HTML-отчёт по run_dir
+adaptive_basin_fvm.jl   quadtree-решатель (эталонная синтетика, Ro-контроль, эксперименты)</code></pre>
+<div class="card"><b>Схема одной оценки J(&theta;):</b> &theta; &rarr; синтетический heat-Workbook (q(x,t) на эпохах, эквивалент инжекции qbasal) &rarr; прогон прямой задачи на рабочей сетке (уплотнение + теплопроводность, PCG на каждом подшаге) &rarr; Ro-постпроцессинг &rarr; выборка расчётных T/Ro в точках скважин (билинейная интерполяция) &rarr; невязки. Оценки кэшируются по SHA-256 округлённого &theta;: одинаковые &theta; из разных стартов бесплатны.</div>
+<div class="card"><b>Два бэкенда прямой задачи.</b> <b>:regular</b> — равномерная сетка nx&times;nz (поиск и приёмка). <b>:adaptive</b> — quadtree: измельчение у границ слоёв/литологических переходов и вокруг точек наблюдений (well_spots); &theta;-независимая геометрия (меши, растеризации, состояния всех подшагов) предвычисляется один раз — precompute_adaptive_geometry, повторные оценки J идут по готовой геометрии.</div>
+
+<h2 id="run">3. Как запускать: сценарии</h2>
+<h3>3.1 Полный рабочий цикл (рекомендуется)</h3>
+<pre><code><span class="c"># Этап A: DE-поиск на грубой сетке (быстро)</span>
+julia --project=rsnft3 -t 8 rsnft3/run_inverse.jl   --data-dir "Данные для обратной задачи"   --wells "Данные для обратной задачи/TemperatureWellData.xlsx;Данные для обратной задачи/VitriniteWellData.xlsx"   --grid 30,60 --ensemble 4 --workers 4 --de-budget 6000   --reg 0 --sigma-T 2 --sigma-Ro 0.05 --seed 11   --out results/inverse_stageA
+
+<span class="c"># Этап B: NM-полировка на тонкой сетке с готового &theta;&#770;</span>
+julia --project=rsnft3 -t 8 rsnft3/run_inverse.jl   --data-dir "Данные для обратной задачи"   --wells "Данные для обратной задачи/TemperatureWellData.xlsx;Данные для обратной задачи/VitriniteWellData.xlsx"   --grid 60,120 --workers 1 --nm-iterations 40 --reg 0   --theta0-file results/inverse_stageA/solution.json   --out results/inverse_final
+
+<span class="c"># Отчёт</span>
+julia --project=rsnft3 rsnft3/report_inverse.jl results/inverse_final</code></pre>
+<div class="card ok"><b>Правило иерархии сеток:</b> поиск — на грубой (дёшево), приёмка — на тонкой (точно). --theta0-file переносит &theta;&#770; между конфигурациями; смена сетки между этапами — осознанный контроль идентифицируемости.</div>
+
+<h3>3.2 Быстрая разведка (~2 минуты)</h3>
+<pre><code>julia --project=rsnft3 -t 8 rsnft3/run_inverse.jl --data-dir "Данные для обратной задачи"   --wells "Данные для обратной задачи/TemperatureWellData.xlsx;Данные для обратной задачи/VitriniteWellData.xlsx"   --grid 20,40 --ensemble 1 --workers 1 --de-budget 2000 --nm-iterations 30   --max-dt-ma 5 --picard-iters 2 --pcg-tol 1e-4 --reg 0 --out results/probe</code></pre>
+
+<h3>3.3 Twin-верификация (проверка метода — запускать до реальных данных)</h3>
+<pre><code><span class="c"># 1) синтетика с известным &theta;_true (75/80/85/90 мВт/м² по эпохам)</span>
+julia --project=rsnft3 -t 8 rsnft3/make_twin.jl --data-dir "Данные для обратной задачи"   --wells "Данные для обратной задачи/TemperatureWellData.xlsx"   --grid 30,60 --q 75,80,85,90 --sigma-T 2 --sigma-Ro 0.05 --seed 42   --out results/twin/twin.json
+<span class="c"># 2) инверсия того же twin (reg=0 обязательно: J(&theta;_true)=0 только без регуляризации)</span>
+julia --project=rsnft3 -t 8 rsnft3/run_inverse.jl --data-dir "Данные для обратной задачи"   --wells results/twin/twin.json --grid 30,60 --ensemble 1 --workers 1   --de-budget 3000 --reg 0 --seed 1 --out results/twin_inv</code></pre>
+<p><b>Критерий успеха:</b> J &rarr; ~&Sigma;(шум/&sigma;)²; средние &theta;&#770; по эпохам &asymp; &theta;_true (молодая эпоха — точнее всех); при ensemble&gt;1 — таблица mean/std.</p>
+
+<h3>3.4 Адаптивная сетка</h3>
+<pre><code><span class="c"># Эталонная twin-синтетика на адаптивной сетке (детальные границы слоёв)</span>
+julia --project=rsnft3 -t 8 rsnft3/make_twin.jl ... --adaptive   --adaptive-base 30,60 --adaptive-level 1 --adaptive-preview 120,160
+
+<span class="c"># Этап контроля на адаптивной сетке при готовом &theta;&#770; (&theta;&#770; не меняет)</span>
+julia --project=rsnft3 -t 8 rsnft3/run_inverse.jl ... --grid 20,40   --theta0-file results/inverse_final/solution.json --nm-iterations 10   --adaptive-final --adaptive-base 16,32 --adaptive-level 2 --adaptive-preview 120,160
+
+<span class="c"># Эксперимент: весь конвейер без равномерной сетки (см. раздел 8)</span>
+<span class="c"># ... --adaptive-search --adaptive-base 16,32 --adaptive-level 1</span></code></pre>
+
+<h3>3.5 Все параметры CLI (run_inverse.jl)</h3>
+<table>
+<tr><th>Параметр</th><th>По умолчанию</th><th>Смысл</th></tr>
+<tr><td>--grid</td><td>50,60</td><td>nx,nz рабочей сетки (поиск: 20×40 / 30×60; приёмка: 60×120)</td></tr>
+<tr><td>--ensemble / --workers</td><td>4 / 4</td><td>число стартов DE / воркеров</td></tr>
+<tr><td>--de-budget</td><td>4000</td><td>бюджет оценок J на DE</td></tr>
+<tr><td>--nm-iterations</td><td>200</td><td>итерации NM (1 итерация &asymp; 10–15 оценок J)</td></tr>
+<tr><td>--sigma-T / --sigma-Ro</td><td>2.0 / 0.05</td><td>СКВО шума наблюдений (&deg;C / %Ro)</td></tr>
+<tr><td>--reg</td><td>1.0</td><td>вес регуляризации гладкости q; для twin — 0</td></tr>
+<tr><td>--weight-ro</td><td>1.0</td><td>вес блока Ro в J</td></tr>
+<tr><td>--weight-ro-cal</td><td>1</td><td>лестница калибровки weight_ro ("1,4,16"), к лучшему &theta;&#770; этапа A</td></tr>
+<tr><td>--n-nodes / --mid-x</td><td>3 / 23400</td><td>X-узлы q(x) (2 или 3) / средний узел, м</td></tr>
+<tr><td>--epochs</td><td>200-100,100-35,35-10,10-0</td><td>эпохи q(t), Ma</td></tr>
+<tr><td>--theta0-file</td><td>&mdash;</td><td>solution.json: полировка с готового &theta;&#770;, перенос между сетками</td></tr>
+<tr><td>--max-dt-ma / --picard-iters / --pcg-tol</td><td>2.5 / 3 / 1e-8</td><td>жёсткость решателя (рычаги скорости, раздел 7)</td></tr>
+<tr><td>--max-f-calls</td><td>0</td><td>лимит оценок J на ступень NM (0 = без лимита)</td></tr>
+<tr><td>--no-multilevel</td><td>выкл</td><td>отключить многоуровневую NM-полировку по эпохам</td></tr>
+<tr><td>--adaptive-final</td><td>выкл</td><td>контроль критериев на адаптивной сетке при лучшем &theta;&#770;</td></tr>
+<tr><td>--adaptive-search</td><td>выкл</td><td>весь конвейер (поиск + критерии) на адаптивной сетке</td></tr>
+<tr><td>--adaptive-base / --adaptive-level</td><td>16,32 / 2</td><td>базовый грид и макс. уровень измельчения quadtree</td></tr>
+<tr><td>--adaptive-preview</td><td>120,160</td><td>растеризация адаптивного решения для выборки наблюдений</td></tr>
+<tr><td>--adaptive-frozen</td><td>выкл</td><td>эксперимент.: меш строится один раз на финальной стратиграфии</td></tr>
+<tr><td>--out</td><td>обязателен</td><td>каталог результатов</td></tr>
+</table>
+
+<h2 id="out">4. Результаты: файлы и их структура</h2>
+<div class="grid2">
+<div class="card">
+<b>solution.json</b> — главный файл:
+<ul>
+<li><b>status, data_dir, wells_spec</b> — что и на чём считалось;</li>
+<li><b>grid</b>: nx, nz, search_backend (regular|adaptive);</li>
+<li><b>layout</b>: имена параметров, nodes_x, эпохи, бокс lower/upper;</li>
+<li><b>settings</b>: все CLI-настройки запуска;</li>
+<li><b>observations</b>: сводка по скважинам (сколько T/Ro точек вошло);</li>
+<li><b>n_dropped_T_inactive</b>: точки, отброшенные вне активной области;</li>
+<li><b>ensemble</b>[i]: theta, J, J_T, J_Ro, J_reg, de_evals, nm_evals, elapsed_s, seed каждого старта;</li>
+<li><b>best</b>: theta (12 значений) и breakdown J лучшего старта;</li>
+<li><b>criteria</b>: rmse_T, rmse_Ro, frac_1s_T, frac_2s_T, frac_1s_Ro, frac_2s_Ro, l2, per_well[];</li>
+<li><b>adaptive</b> (при --adaptive-final): критерии на адаптивной сетке;</li>
+<li><b>elapsed_total_s</b>.</li>
+</ul>
+</div>
+<div class="card">
+<b>result.npz</b> — поля финального прогона:
+<ul>
+<li>x, z — координатные сетки, м;</li>
+<li>ages_ma — сохранённые возрастные срезы;</li>
+<li>temperature_c — (время, z, x), &deg;C;</li>
+<li>final_lithology, final_porosity — финальный срез;</li>
+<li>final_surface_m, final_base_m — дно и кровля фундамента.</li>
+</ul>
+<b>result_adaptive.npz</b> + <b>mesh_adaptive.png</b> — то же для адаптивного этапа.<br><br>
+<b>cache_main/</b> — кэш оценок J (можно удалять).<br>
+<b>report.html</b> — отчёт (report_inverse.jl).
+</div>
+</div>
+
+<h2 id="interp">5. Как интерпретировать критерии</h2>
+<table>
+<tr><th>Метрика</th><th>Смысл</th><th>Хорошее значение</th></tr>
+<tr><td>rmse_T</td><td>RMS невязок T по всем точкам</td><td>&le; 2&sigma;_T = 4 &deg;C; отлично &asymp; &sigma;_T = 2</td></tr>
+<tr><td>rmse_Ro</td><td>RMS невязок Ro</td><td>&le; 2&sigma;_Ro = 0.10</td></tr>
+<tr><td>frac_2s_T</td><td>доля T-точек с |res| &le; 2&sigma;</td><td>&ge; 95% — приёмка (условие 18)</td></tr>
+<tr><td>frac_1s_T</td><td>доля точек в &sigma;</td><td>&ge; 60–70% на реальных данных</td></tr>
+<tr><td>l2 (E^L2)</td><td>расхождение с эталонным прогоном (только twin)</td><td>&rarr; 0</td></tr>
+</table>
+<ol>
+<li><b>Приёмка (условие 18):</b> RMSE &le; 2&sigma; И &ge; 95% точек в 2&sigma;. Если RMSE_T &asymp;&gtr; &sigma;_T — модель не объясняет температуру; смотреть, где сидит невязка: верх профиля &rarr; Tsurf/свойства пород, низ &rarr; q (наш параметр).</li>
+<li><b>Идентификация &theta;&#770;:</b> std по ансамблю &Lt;&Lt; ширины бокса [30,120] — параметр выявлен; std &asymp; полбокса — неединственность. Ro интегрирует всю тепловую историю: старые эпохи (200–100, 100–35 Ma) ограничены слабее всего — разброс ожидаем именно там.</li>
+<li><b>Эквифинальность:</b> средние по эпохам могут обмениваться смещением (компенсация между соседними эпохами) при близком J — смотрите per-epoch средние &theta;&#770;, а не только компоненты.</li>
+<li><b>J_reg:</b> большой скачок от гладкого приора = данные требуют латеральной изменчивости q(x) — проверить x-узловые столбцы &theta;&#770;.</li>
+<li><b>Устойчивость минимума:</b> независимые старты DE сходятся к J_min с разбросом &lt; 0.1% — сначала сравните J между стартами, и только потом интерпретируйте разброс &theta;&#770; как физику.</li>
+<li><b>Контроль сетки:</b> приёмка на рабочей сетке; лучший &theta;&#770; дополнительно прогоняется на сетке ×1.5 или адаптивной (--adaptive-final). Систематический сдвиг критериев при смене сетки = смена модели.</li>
+</ol>
+
+<h2 id="mesh">6. Картинки адаптивной сетки</h2>
+<p>Отрисовка — порт rsnft2/visualize_adaptive_mesh.py: заливка ячеек температурой (палитра magma), обводка цветом уровня измельчения (серый L0, синий L1, красный L2, фиолетовый L3), серая заливка — неактивный фундамент; PNG 1500×900 пишется напрямую, без внешних зависимостей.</p>
+<h3>6.1 Автоматически</h3>
+<p>При <code>--adaptive-final</code> или <code>--adaptive-search</code> в каталог результата пишется <b>mesh_adaptive.png</b> (финальный меш + температура при &theta;&#770;), путь печатается строкой <code>MESH_PNG &lt;path&gt;</code>.</p>
+<h3>6.2 Standalone-прогон адаптивного решателя</h3>
+<pre><code>julia --project=rsnft3 -t 8 rsnft3/adaptive_basin_fvm.jl   --data-dir "Данные для обратной задачи"   --cache-dir results/adaptive_runs   --base-nx 30 --base-nz 60 --max-level 3   --max-dt-ma 2.5 --picard-iterations 3 --linear-tolerance 1e-6
+<span class="c"># stdout: RUN &lt;run_id&gt; ... затем MESH_PNG &lt;run_dir&gt;/mesh.png</span>
+<span class="c"># run_id кэшируется по конфигурации; --force для перепрогона</span></code></pre>
+<h3>6.3 Картинка для конкретного &theta;&#770; обратной задачи (например, из E4)</h3>
+<pre><code>using JSON
+include("rsnft3/objective.jl")
+data  = load_dataset("Данные для обратной задачи", "results/_ageprobe")
+wells = load_wells_xlsx("Данные для обратной задачи/TemperatureWellData.xlsx",
+                        data; kind=:T, sigma_T=2.0)
+acfg  = AdaptiveConfig(base_nx=30, base_nz=60, max_level=3, max_dt_ma=2.5,
+                       picard_iterations=3, picard_tolerance_c=1e-3,
+                       linear_tolerance=1e-6, preview_nx=120, preview_nz=160,
+                       well_spots=[(p.x, p.z) for p in wells.points])
+geo   = precompute_adaptive_geometry(data, acfg)
+b     = data.bounds; pdx = (b[2]-b[1])/acfg.preview_nx
+axg   = collect(range(b[1]+0.5pdx, b[2]-0.5pdx; length=acfg.preview_nx))
+th    = Float64.(JSON.parsefile("results/e4_real/solution.json")["best"]["theta"])
+<span class="c"># th_layout — ThetaLayout с теми же epochs/n_nodes, что в E4</span>
+res   = run_adaptive(data, acfg; qbasal_by_age=qbasal_by_age(th_layout, th, axg, data.ages),
+                     qbasal_nodes_x=th_layout.nodes_x, geometry=geo)
+save_mesh_drawing(res.mesh, res.grid, res.final_temperature_cells,
+                  "results/inverse_mesh_L3.png")</code></pre>
+<p class="note">Готовые примеры: results/inverse_mesh_L3.png (32 256 ячеек, L3, &theta;&#770; E4), results/adaptive_final_test/mesh_adaptive.png (485 ячеек, L1), results/adaptive_smoke/mesh_smoke.png.</p>
+<h3>6.4 Серия прогонов для сходимости по сеткам</h3>
+<pre><code>julia --project=rsnft3 rsnft3/run_adaptive_grid.jl --data-dir "Данные для обратной задачи"   --case 16,16,1 --case 16,16,2 --case 16,16,3</code></pre>
+
+<h2 id="speed">7. Скорость и ручки ускорения</h2>
+<table>
+<tr><th>Конфигурация</th><th>с/оценку J</th><th>Полный цикл</th></tr>
+<tr><td>20×40, pcg 1e-4, dt 5, Picard 2</td><td>0.019</td><td><b>114 с</b> (DE 2000, 1 процесс)</td></tr>
+<tr><td>30×60, pcg 1e-4, dt 5, Picard 2</td><td>0.070</td><td><b>7.2 мин</b> (DE 6000, 4 воркера)</td></tr>
+<tr><td>30×60, pcg 1e-8 (базовая)</td><td>0.48</td><td>19.3 мин</td></tr>
+<tr><td>полировка 60×120 с готового &theta;&#770;</td><td>0.53</td><td><b>44 с</b></td></tr>
+<tr><td>адаптивный бэкенд b16×32 L1 + скважины</td><td>~0.5–1</td><td>контроль: +1–2 мин</td></tr>
+</table>
+<div class="card"><b>Главный рычаг</b> — --pcg-tol 1e-4 на этапе поиска (ландшафт J сохраняется до 5–6 значащих цифр, минимум не меняется). <b>«Золотое правило»:</b> быстрые ручки — для поиска, финальные критерии — всегда точным решателем из &theta;&#770; через --theta0-file. Воркеры окупаются при &ge; 0.15 с/оценку; на 20×40 — --workers 1.</div>
+
+<h2 id="adaptive">8. Адаптивная сетка: когда применять (измеренные выводы)</h2>
+<ol>
+<li><b>Эквивалентность level-0:</b> при max_level=0 адаптивный решатель совпадает с равномерным до дискретизации граней (RMS 0.0044 &deg;C, отн. 2×10<sup>&minus;5</sup>).</li>
+<li><b>RMSE_T</b> ограничен разрешением интерьера базы: b16×32 L2/L3 &rarr; 3.58/3.44, b32×64 &rarr; 3.37; равномерная 60×120 даёт 1.53. Измельчение у границ слоёв не помогает T-точкам в интерьере — ошибка приходит через грубый стенсил окрестности; пятна вокруг скважин (well_spots) дают лишь ~0.1 &deg;C.</li>
+<li><b>RMSE_Ro</b> адаптив улучшает стабильно: 0.027–0.035 &rarr; <b>0.018</b> (частицы Ro сидят на границах слоёв, где измельчение работает).</li>
+<li><b>Twin-приёмка</b> (эталон адаптивный, base 30×60 L1, &theta;_true = 75/80/85/90): инверсия 20×40 — RMSE_T 4.21; адаптивный контроль от recovered &theta;&#770; — <b>0.53 &deg;C</b>; молодая эпоха 89.65 (&minus;0.35 мВт/м² от истины, окно 90±3 выполнено).</li>
+<li><b>Замороженный меш</b> (--adaptive-frozen): при b16×32 результат побайтно совпадает с подвижным; при b30×60 дестабилизирует remap (экспериментальный режим, по умолчанию выключен).</li>
+<li><b>Практическое правило:</b> T-этап контроля — равномерная полировка (--theta0-file на 60×120); адаптив — Ro-критерий и эталонная twin-синтетика.</li>
+</ol>
+
+<h2 id="traps">9. Грабли</h2>
+<div class="card warn"><b>Регуляризация и twin:</b> twin-проверка — только с --reg 0, иначе J(&theta;_true) &ne; 0 строго.</div>
+<div class="card"><ul>
+<li>Глубина в XLSX организаторов положительна <b>вниз</b>; загрузчики это учитывают. У скважины A 2 точки вне осадочной геометрии — отбрасываются при загрузке (видно в solution.json).</li>
+<li>--nm-iterations — итерации симплекса, а не оценки J (реальное число оценок в 10–15 раз больше). Быстрая полировка: 30–40 итераций.</li>
+<li>Первый запуск после addprocs платит за JIT каждого воркера (~20–30 с) — бюджет оценок считать для steady state.</li>
+<li>При --sigma-T 0 (точный twin) доли «в &sigma;» в отчёте = null — ожидаемо.</li>
+<li>Julia запускать с -t 8; DE параллелится по воркерам, NM — строго последователен.</li>
+<li>Кэш J ключуется по &theta; (SHA-256 округлённого вектора) — одинаковые &theta; из разных стартов бесплатны; каталог кэша можно удалять целиком.</li>
+<li>Строка ENSEMBLE J &asymp; 2×10<sup>6</sup> в twin-цикле — это 2 точки с постоянным штрафом 10<sup>6</sup> (вне активной области на тонком клине), не сбой.</li>
+<li>results/ в .gitignore — выводы фиксируются пустыми коммитами; генерируемые файлы помечаются как производные.</li>
+</ul></div>
+
+<p class="note" style="margin-top:3em; border-top:1px solid var(--line); padding-top:12px;">rsnft3 · ветка dev-adaptive-only · все замеры измеренные · inverse_guide.html</p>
+</div></body>
+</html>

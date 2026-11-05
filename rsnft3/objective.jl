@@ -96,6 +96,20 @@ data — датасет без heat (инжекция внутри objective); r
 function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, layout::ThetaLayout;
                         reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "",
                         backend::Symbol = :regular, adaptive_cfg = nothing)
+    if backend === :adaptive && adaptive_cfg !== nothing && !(wells === nothing)
+        spots = Tuple{Float64,Float64}[(p.x, p.z) for p in wells.points]
+        adaptive_cfg = AdaptiveConfig(base_nx = adaptive_cfg.base_nx, base_nz = adaptive_cfg.base_nz,
+                                      max_level = adaptive_cfg.max_level,
+                                      interface_band = adaptive_cfg.interface_band,
+                                      max_dt_ma = adaptive_cfg.max_dt_ma,
+                                      picard_iterations = adaptive_cfg.picard_iterations,
+                                      picard_tolerance_c = adaptive_cfg.picard_tolerance_c,
+                                      linear_tolerance = adaptive_cfg.linear_tolerance,
+                                      preview_nx = adaptive_cfg.preview_nx,
+                                      preview_nz = adaptive_cfg.preview_nz,
+                                      well_spots = spots,
+                                      well_refine_radius = adaptive_cfg.well_refine_radius)
+    end
     adaptive_geo = backend === :adaptive ? precompute_adaptive_geometry(data, adaptive_cfg) : nothing
     if backend === :adaptive
         # маска = проекция активных ячеек финального меша (состояние age 0) на preview
