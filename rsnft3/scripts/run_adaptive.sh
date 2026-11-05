@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Adaptive-grid inverse run with report, mesh pictures and a final summary.
 # Bash counterpart of run_adaptive.ps1: wraps run_inverse.jl (adaptive backend)
-# + report_inverse.jl, then prints acceptance numbers from solution.json.
+# + report_full.jl (inverse section), then prints acceptance numbers from solution.json.
 #
 # Usage:
 #   ./run_adaptive.sh                              # final mode, defaults
@@ -126,8 +126,8 @@ SOLUTION="$OUT_DIR/solution.json"
 if [[ "$NO_REPORT" == 0 ]]; then
     echo ""
     echo "=== report ==="
-    julia --project="$R3" "$R3/report_inverse.jl" "$OUT_DIR" \
-        || echo "report_inverse.jl failed; continuing" >&2
+    julia --project="$R3" "$R3/report_full.jl" --inverse "$OUT_DIR" \
+        || echo "report_full.jl failed; continuing" >&2
 fi
 
 echo ""

@@ -3,7 +3,7 @@
     Adaptive-grid inverse run with report, mesh pictures and a final summary.
 
 .DESCRIPTION
-    Wraps rsnft3/run_inverse.jl (adaptive backend) + rsnft3/report_inverse.jl,
+    Wraps rsnft3/run_inverse.jl (adaptive backend) + rsnft3/report_full.jl,
     then prints the key acceptance numbers from solution.json and the
     paths of the generated report/mesh artifacts.
 
@@ -109,8 +109,8 @@ if (-not (Test-Path $SolutionPath)) { throw "solution.json missing: $SolutionPat
 
 if (-not $NoReport) {
     Write-Host "`n=== report ===" -ForegroundColor Cyan
-    & $JuliaExe "--project=$R3" (Join-Path $R3 "report_inverse.jl") $OutDir
-    if ($LASTEXITCODE -ne 0) { Write-Warning "report_inverse.jl failed; continuing" }
+    & $JuliaExe "--project=$R3" (Join-Path $R3 "report_full.jl") --inverse $OutDir
+    if ($LASTEXITCODE -ne 0) { Write-Warning "report_full.jl failed; continuing" }
 }
 
 $sol = Get-Content $SolutionPath -Raw -Encoding UTF8 | ConvertFrom-Json

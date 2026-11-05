@@ -14,7 +14,7 @@ criteria.jl             RMSE по скважинам, доли |res| ≤ σ/2σ 
 invert.jl               DE (BlackBoxOptim) -> многоуровневая NM-полировка -> ансамбль
 run_inverse.jl          CLI-точка входа -> results/<run>/solution.json + result.npz
 make_twin.jl            генерация twin-наблюдений из известного θ_true
-report_inverse.jl       самодостаточный HTML-отчёт
+report_full.jl          единый HTML-отчёт (прямая + обратная задача; секции по флагам)
 ```
 
 ## 1. Рабочая сетка и бюджет
@@ -59,7 +59,7 @@ julia --project=. run_inverse.jl --data-dir "../Данные для обратн
       --nm-iterations 40 --reg 0 --theta0-file ../results/twin_stageA/solution.json \
       --out ../results/inverse_twin
 
-julia --project=. report_inverse.jl ../results/inverse_twin
+julia --project=. report_full.jl --inverse ../results/inverse_twin
 ```
 
 **Регуляризация и twin:** с reg > 0 оптимум смещается от θ_true (при reg=1
@@ -85,7 +85,7 @@ julia --project=. run_inverse.jl \
       --theta0-file ../results/inverse_stageA/solution.json \
       --out ../results/inverse_real
 
-julia --project=. report_inverse.jl ../results/inverse_real
+julia --project=. report_full.jl --inverse ../results/inverse_real
 ```
 
 Ключевые опции: `--epochs "200-100,100-35,35-10,10-0"`,
