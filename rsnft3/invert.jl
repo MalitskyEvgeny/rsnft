@@ -41,10 +41,13 @@ worker_J(θ::AbstractVector{<:Real}) = _WORKER_OBJ[](θ)[1]
 "Синхронизация кэшей воркеров в главный JSON (слияние)."
 function merge_worker_caches!(obj::Objective)
     for w in workers()
+        wctx = remotecall_fetch(() -> _WORKER_OBJ[].ctx_hash, w)
+        # v2-ключи контекстны: воркеры обязаны иметь тот же контекст, что и главный
+        wctx == obj.ctx_hash || error("cache context mismatch: worker $w ($(wctx[1:8])) != main ($(obj.ctx_hash[1:8]))")
         wc = remotecall_fetch(() -> _WORKER_OBJ[].cache, w)
         merge!(obj.cache, wc)
     end
-    cache_save(obj)
+    cache_save(obj; force = true)
     return obj
 end
 
@@ -88,13 +91,19 @@ end
 obj_fine; оба главных кэша сохраняются."
 function merge_worker_caches_c2f!(obj_coarse::Objective, obj_fine::Objective)
     for w in workers()
+        wctx = remotecall_fetch(() -> _WORKER_OBJ_COARSE[].ctx_hash, w)
+        wctx == obj_coarse.ctx_hash ||
+            error("cache context mismatch (coarse): worker $w != main")
+        wctxF = remotecall_fetch(() -> _WORKER_OBJ[].ctx_hash, w)
+        wctxF == obj_fine.ctx_hash ||
+            error("cache context mismatch (fine): worker $w != main")
         wc = remotecall_fetch(() -> _WORKER_OBJ_COARSE[].cache, w)
         merge!(obj_coarse.cache, wc)
         wf = remotecall_fetch(() -> _WORKER_OBJ[].cache, w)
         merge!(obj_fine.cache, wf)
     end
-    cache_save(obj_coarse)
-    cache_save(obj_fine)
+    cache_save(obj_coarse; force = true)
+    cache_save(obj_fine; force = true)
     return nothing
 end
 
