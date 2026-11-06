@@ -2,6 +2,8 @@
 # Фатальные проблемы -> validate_inputs бросает ErrorException (caller делает exit(1));
 # подозрительные, но допустимые конфигурации -> @warn.
 
+isdefined(@__MODULE__, :XLSX) || import XLSX
+
 const REQUIRED_FILES = isdefined(@__MODULE__, :REQUIRED) ? REQUIRED :
                        ("Depth.xlsx", "Lithology.xlsx", "Porosity.xlsx", "Tsurf.xlsx",
                         "lithotype_properties.xlsx")
@@ -17,7 +19,10 @@ function validate_data_dir(data_dir::AbstractString)
     known = Set{String}(REQUIRED_FILES)
     for f in readdir(data_dir)
         endswith(f, ".xlsx") || continue
-        f in known || @warn "лишний xlsx в каталоге данных (будет проигнорирован)" file = f
+        f in known && continue
+        # wells-файлы живут рядом с данными и используются по спецификации --wells
+        occursin("well", lowercase(f)) && continue
+        @warn "лишний xlsx в каталоге данных (будет проигнорирован)" file = f
     end
     return nothing
 end
@@ -35,9 +40,8 @@ function validate_wells_spec(spec::AbstractString)
         if endswith(lowercase(path), ".xlsx")
             local sheets
             try
-                xf = XLSX.openxlsx(path)
+                xf = XLSX.readxlsx(path)
                 sheets = XLSX.sheetnames(xf)
-                close(xf)
             catch err
                 throw(ErrorException("wells-файл не читается: $path ($(sprint(showerror, err)))"))
             end
