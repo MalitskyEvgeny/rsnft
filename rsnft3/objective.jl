@@ -62,6 +62,8 @@ struct Objective
     t_targets::Vector{TTarget}
     ro_targets::Vector{RoTarget}
     n_dropped_T::Int                       # точки в неактивных ячейках сетки
+    n_artifact_T::Base.RefValue{Int}       # кумулятивно: артефактные выборки T
+    n_artifact_Ro::Base.RefValue{Int}      # кумулятивно: артефактные выборки Ro
     cache::Dict{String,Vector{Float64}}    # key -> [J, J_T, J_Ro, J_reg]
     cache_path::String                     # "" — только в памяти
     evals::Base.RefValue{Int}
@@ -171,7 +173,8 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
     end
     geometry = backend === :adaptive ? adaptive_geo : precompute_geometry(data, cfg)
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
-                     t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0),
+                     t_targets, ro_targets, n_dropped, Ref(0), Ref(0),
+                     cache, cache_path, Ref(0),
                      geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
 end
 
@@ -214,6 +217,7 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     if haskey(obj.cache, key)
         v = obj.cache[key]
         return v[1], (J_T = v[2], J_Ro = v[3], J_reg = v[4], cached = true,
+                      n_artifact_T = 0, n_artifact_Ro = 0,
                       evals = obj.evals[], t_seconds = 0.0)
     end
     t0 = time()
@@ -234,19 +238,29 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     xg, zg = result.x, result.z
     temp0 = result.temperature_c[end, :, :]          # (nz, nx), t = 0
 
-    J_T = 0.0
+    J_T = 0.0; n_art_T = 0
     for t in obj.t_targets
-        v = bilinear_sample(xg, zg, temp0, t.x, t.z)
+        v, degenerate = bilinear_sample_flagged(xg, zg, temp0, t.x, t.z)
         w = t.sigma > 0 ? 1.0 / t.sigma^2 : 1.0
-        J_T += isfinite(v) ? w * (v - t.value)^2 : 1.0e6
+        if isfinite(v) && !degenerate
+            J_T += w * (v - t.value)^2
+        else
+            n_art_T += 1                    # артефакт: вклад 0, счётчик в info
+        end
     end
 
-    J_Ro = 0.0
+    J_Ro = 0.0; n_art_Ro = 0
     for t in obj.ro_targets
         rc = particle_ro(result, obj.data, t.x, t.layer, t.eta)
         w = t.sigma > 0 ? 1.0 / t.sigma^2 : 1.0
-        J_Ro += isfinite(rc) ? w * (rc - t.value)^2 : 1.0e6
+        if isfinite(rc)
+            J_Ro += w * (rc - t.value)^2
+        else
+            n_art_Ro += 1
+        end
     end
+    obj.n_artifact_T[] += n_art_T
+    obj.n_artifact_Ro[] += n_art_Ro
 
     d_node, d_epoch = theta_diffs(obj.layout, θ)
     J_reg = obj.reg * (sum(abs2, d_node) + sum(abs2, d_epoch))
@@ -255,5 +269,6 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     obj.cache[key] = [J, J_T, J_Ro, J_reg]
     cache_save(obj)
     return J, (J_T = J_T, J_Ro = J_Ro, J_reg = J_reg, cached = false,
+               n_artifact_T = n_art_T, n_artifact_Ro = n_art_Ro,
                evals = obj.evals[], t_seconds = time() - t0)
 end
