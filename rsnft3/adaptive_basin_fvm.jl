@@ -781,6 +781,8 @@ changed: рисуем только если хэш геометрии сетки
 function mesh_png_maybe(mesh::AdaptiveMesh, grid::CellGrid, temperature_c::Vector{Float64},
                         run_dir::AbstractString)
     mode = MESH_PNG_MODE[]
+    mode in ("always", "changed", "never") ||
+        error("--mesh-png: допустимы always | changed | never, получено: $mode")
     mode == "never" && return nothing
     mark = joinpath(run_dir, "mesh.hash")
     geo_hash = bytes2hex(sha256(string(length(mesh.cells), mesh.bounds)))[1:16]

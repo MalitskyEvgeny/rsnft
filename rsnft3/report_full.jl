@@ -124,6 +124,7 @@ function main()
     end
     isempty(DIRECT_DIR) || isdir(DIRECT_DIR) || error("каталог прямой задачи не найден: $DIRECT_DIR")
     isempty(INVERSE_DIR) || isdir(INVERSE_DIR) || error("каталог обратной задачи не найден: $INVERSE_DIR")
+    REPORT_OUT_PATH[] = out_path
     html = build_report(DIRECT_DIR, INVERSE_DIR, out_path)
     mkpath(dirname(abspath(out_path)))
     write(out_path, html)
