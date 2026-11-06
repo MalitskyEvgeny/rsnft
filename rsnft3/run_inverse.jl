@@ -22,14 +22,17 @@ include(joinpath(@__DIR__, "criteria.jl"))
 include(joinpath(@__DIR__, "invert.jl"))
 include(joinpath(@__DIR__, "config_check.jl"))
 
+include(joinpath(@__DIR__, "progress.jl"))
+using .Progress
+
 function parse_cli()
     s = ArgParseSettings(description = "Inverse problem: basal heat flow q(x,t) from well T and Ro")
     @add_arg_table s begin
         "--data-dir"      ; required = true
         "--wells"         ; required = true; help = "semicolon-separated XLSX/JSON paths"
         "--grid"          ; default = "50,60"; help = "nx,nz of the working grid"
-        "--ensemble"      ; arg_type = Int; default = 4
-        "--workers"       ; arg_type = Int; default = 0   # 0 = авто: все логические ядра
+        "--ensemble"      ; arg_type = Int; default = 4   # 0 = авто: Sys.CPU_THREADS
+        "--workers"       ; arg_type = Int; default = 0   # 0 = авто: по числу ансамблей
         "--de-budget"     ; arg_type = Int; default = 4000
         "--nm-iterations" ; arg_type = Int; default = 200
         "--sigma-T"       ; arg_type = Float64; default = 2.0
@@ -113,7 +116,14 @@ function setup_inverse(args)
                        picard_tolerance_c = args["picard-tol"],
                        pcg_tolerance = args["pcg-tol"])
 
-    args["workers"] == 0 && (args["workers"] = Int(Sys.CPU_THREADS))
+    # авто-воркеры: не больше стартов, чем воркеров — воркеров ровно по ансамблю
+    # (иначе серийный fallback invert_ensemble и лишние воркеры простаивают в памяти)
+    if args["ensemble"] == 0
+        args["ensemble"] = args["workers"] > 0 ? args["workers"] : Int(Sys.CPU_THREADS)
+        args["workers"] = args["ensemble"]
+    elseif args["workers"] == 0
+        args["workers"] = args["ensemble"]
+    end
     # процесс-параллелизм: по одному потоку на процесс, BLAS-потоки в 1 —
     # иначе W процессов × N BLAS-потоков переполняют ядра (oversubscription)
     LinearAlgebra.BLAS.set_num_threads(1)
@@ -121,7 +131,7 @@ function setup_inverse(args)
     if args["workers"] > 1 && nprocs() == 1
         addprocs(args["workers"] - 1)
         for f in ("parameterized_data.jl", "ro_kinetics.jl", "observations.jl",
-                  "objective.jl", "criteria.jl", "invert.jl")
+                  "objective.jl", "criteria.jl", "progress.jl", "invert.jl")
             @everywhere include(joinpath($(@__DIR__), $f))
         end
         for pr in procs()
@@ -353,13 +363,25 @@ end
 function run_mode(ctx)
     args = ctx.args
     if args["c2f"]
-        return mode_c2f(ctx)
+        Progress.stage_set(1, 2, "coarse-to-fine inversion")
+        out = mode_c2f(ctx)
+        Progress.stage_set(2, 2, "final forward & control")
+        return out
     elseif !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
-        return mode_weight_ro_cal(ctx)
+        Progress.stage_set(1, 2, "weight_ro calibration ladder")
+        out = mode_weight_ro_cal(ctx)
+        Progress.stage_set(2, 2, "final forward & control")
+        return out
     elseif !isempty(args["theta0-file"])
-        return mode_theta0(ctx)
+        Progress.stage_set(1, 2, "polish from theta0")
+        out = mode_theta0(ctx)
+        Progress.stage_set(2, 2, "final forward & control")
+        return out
     else
-        return mode_plain(ctx)
+        Progress.stage_set(1, 2, "DE inversion ensemble")
+        out = mode_plain(ctx)
+        Progress.stage_set(2, 2, "final forward & control")
+        return out
     end
 end
 
@@ -526,6 +548,7 @@ end
 
 function main()
     args = parse_cli()
+    Progress.init()
     # 4.4: динамический бюджет полировки по умолчанию — не «тихое удешевление»,
     # а ограничение сверху: NM обычно сходится раньше, лимит режет хвосты.
     args["max-f-calls"] == -1 &&
