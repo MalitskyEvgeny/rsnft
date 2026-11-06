@@ -57,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --nz)             NZ="$2"; shift 2 ;;
         --max-dt-ma)      MAX_DT_MA="$2"; shift 2 ;;
         --picard-iters)   PICARD="$2"; shift 2 ;;
+        --threads)        THREADS="$2"; shift 2 ;;
         --out)            OUT="$2"; shift 2 ;;
         --force)          FORCE=1; shift ;;
         --open)           OPEN=1; shift ;;
@@ -90,7 +91,7 @@ else
 fi
 [[ $FORCE -eq 1 ]] && SOLVER_ARGS+=(--force)
 
-RUN_LINE="$("$JULIA" --project="$R3" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
+RUN_LINE="$("$JULIA" --project="$R3" -t "$THREADS" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
 RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d ':')"
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"

@@ -25,7 +25,7 @@
 #   --adaptive-level N  адаптивный уровень инверсии (2)
 #   --uniform           равномерные сетки вместо адаптивных
 #   --nx N --nz N       сетка равномерной прямой задачи (60 120; только с --uniform)
-#   --ensemble N --workers N --de-budget N --nm-iterations N
+#   --ensemble N --workers N --de-budget N --nm-iterations N --threads N
 #   --sigma-T F --sigma-Ro F --reg F --seed N
 #   --theta0-file FILE  полировка из готового solution.json (DE пропускается)
 #   --out DIR           каталог отчёта (results/report_full_<timestamp>)
@@ -55,6 +55,7 @@ NZ=120
 ENSEMBLE=1
 WORKERS=1
 DE_BUDGET=2000
+THREADS=8
 NM_ITERATIONS=30
 SIGMA_T=2.0
 SIGMA_RO=0.05
@@ -100,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         --ensemble)      ENSEMBLE="$2"; shift 2 ;;
         --workers)       WORKERS="$2"; shift 2 ;;
         --de-budget)     DE_BUDGET="$2"; shift 2 ;;
+        --threads)       THREADS="$2"; shift 2 ;;
         --nm-iterations) NM_ITERATIONS="$2"; shift 2 ;;
         --sigma-T)       SIGMA_T="$2"; shift 2 ;;
         --sigma-Ro)      SIGMA_RO="$2"; shift 2 ;;
@@ -144,7 +146,7 @@ else
     SOLVER="$R3/adaptive_basin_fvm.jl"
 fi
 [[ $FORCE -eq 1 ]] && SOLVER_ARGS+=(--force)
-RUN_LINE="$("$JULIA" --project="$R3" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
+RUN_LINE="$("$JULIA" --project="$R3" -t "$THREADS" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
 RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d ':')"
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
@@ -163,7 +165,7 @@ fi
 if [[ $TWIN -eq 1 ]]; then
     TWIN_FILE="$OUT_DIR/twin_grid.json"
     echo "--- twin: q=$TWIN_Q, grid $GRID ---"
-    "$JULIA" --project="$R3" "$R3/make_twin.jl" --data-dir "$INV_DATA_DIR" \
+    "$JULIA" --project="$R3" -t "$THREADS" "$R3/make_twin.jl" --data-dir "$INV_DATA_DIR" \
         --wells "${WELLS%%;*}" --grid "$GRID" --q "$TWIN_Q" \
         --sigma-T "$SIGMA_T" --sigma-Ro "$SIGMA_RO" --seed "$TWIN_SEED" \
         --out "$TWIN_FILE"
@@ -171,10 +173,10 @@ if [[ $TWIN -eq 1 ]]; then
 fi
 [[ -n "$THETA0" ]] && INVERSE_ARGS+=(--theta0-file "$THETA0")
 
-"$JULIA" --project="$R3" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"
+"$JULIA" --project="$R3" -t "$THREADS" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"
 
 echo "=== report ==="
-"$JULIA" --project="$R3" "$R3/report_full.jl" \
+"$JULIA" --project="$R3" -t "$THREADS" "$R3/report_full.jl" \
     --direct "$RUN_DIR" --inverse "$OUT_DIR/inverse" --out "$OUT_DIR/report.html"
 
 echo "=== summary ==="

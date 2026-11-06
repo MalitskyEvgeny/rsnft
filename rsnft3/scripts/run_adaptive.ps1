@@ -48,6 +48,13 @@ param(
     [switch]$OpenReport
 )
 
+# UTF-8 консоль (кириллица в логах без '?????')
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch { }
+
 $ErrorActionPreference = "Stop"
 
 # $PSScriptRoot is empty inside param() defaults (PS 5.1); resolve here.

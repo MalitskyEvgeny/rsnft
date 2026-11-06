@@ -33,6 +33,7 @@ param(
     [int]   $Ensemble      = 1,
     [int]   $Workers       = 1,
     [int]   $DeBudget      = 2000,
+    [int]   $Threads       = 8,
     [int]   $NmIterations  = 30,
     [double]$SigmaT        = 2.0,
     [double]$SigmaRo       = 0.05,
@@ -43,6 +44,14 @@ param(
     [switch]$Force,
     [switch]$OpenReport
 )
+
+# UTF-8 консоль (кириллица в логах без '?????')
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch { }
+
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -86,7 +95,7 @@ if ($Uniform) {
                     "--max-level", "$Level")
 }
 if ($Force) { $SolverArgs += "--force" }
-$SolverOut = & $JuliaExe "--project=$R3" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+$SolverOut = & $JuliaExe "--project=$R3" "-t" "$Threads" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
 $RunLine = ($AllOut | Select-String -Pattern "^(RUN|CACHE_HIT)" | Select-Object -Last 1)
 if (-not $RunLine) { throw "solver did not report a run id" }
 $RunId = (($RunLine.ToString() -replace '[^\w\s]', ' ') -split '\s+' |
@@ -100,7 +109,7 @@ $WellsForInverse = $Wells
 if ($Twin) {
     $TwinFile = Join-Path $Out "twin_grid.json"
     Write-Host "--- twin: q=$Q, grid $Grid ---"
-    & $JuliaExe "--project=$R3" (Join-Path $R3 "make_twin.jl") `
+    & $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "make_twin.jl") `
         --data-dir $InvDataDir --wells ($Wells -split ';')[0] --grid $Grid --q $Q `
         --sigma-T $SigmaT --sigma-Ro $SigmaRo --seed $TwinSeed --out $TwinFile
     if ($LASTEXITCODE -ne 0) { throw "make_twin.jl failed" }
@@ -122,7 +131,7 @@ if ($Theta0File) { $InverseArgs += @("--theta0-file", $Theta0File) }
 if ($LASTEXITCODE -ne 0) { throw "run_inverse.jl failed" }
 
 Write-Host "=== report ==="
-& $JuliaExe "--project=$R3" (Join-Path $R3 "report_full.jl") `
+& $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "report_full.jl") `
     --direct $RunDir --inverse (Join-Path $Out "inverse") --out (Join-Path $Out "report.html")
 if ($LASTEXITCODE -ne 0) { throw "report_full.jl failed" }
 

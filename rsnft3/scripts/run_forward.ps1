@@ -22,10 +22,19 @@ param(
     [int]   $Nz            = 120,
     [double]$MaxDtMa       = 2.5,
     [int]   $PicardIters   = 3,
+    [int]   $Threads       = 8,
     [string]$Out           = "",
     [switch]$Force,
     [switch]$OpenReport
 )
+
+# UTF-8 консоль (кириллица в логах без '?????')
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch { }
+
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -61,7 +70,7 @@ if ($Uniform) {
 }
 if ($Force) { $SolverArgs += "--force" }
 
-$SolverOut = & $JuliaExe "--project=$R3" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+$SolverOut = & $JuliaExe "--project=$R3" "-t" "$Threads" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
 $RunLine = ($AllOut | Select-String -Pattern "^(RUN|CACHE_HIT)" | Select-Object -Last 1)
 if (-not $RunLine) { throw "solver did not report a run id" }
 $RunId = (($RunLine.ToString() -replace '[^\w\s]', ' ') -split '\s+' |
@@ -71,7 +80,7 @@ $RunDir = Join-Path $RepoRoot "results\$RunId"
 Write-Host "run dir: $RunDir"
 
 Write-Host "=== report ==="
-& $JuliaExe "--project=$R3" (Join-Path $R3 "report_full.jl") --direct $RunDir --out (Join-Path $Out "report.html")
+& $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "report_full.jl") --direct $RunDir --out (Join-Path $Out "report.html")
 if ($LASTEXITCODE -ne 0) { throw "report_full.jl failed" }
 
 Write-Host "=== summary ==="
