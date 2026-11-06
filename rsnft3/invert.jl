@@ -135,13 +135,10 @@ function de_search(f_eval, layout; de_budget::Int, seed::Int, trace::Bool = fals
     return best_candidate(res), best_fitness(res), BlackBoxOptim.f_calls(res)
 end
 
-"Одна инверсия: DE по всему θ → NM-полировка по уровням эпох. f_eval(θ) -> J."
-function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool = true,
-                       seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
-                       max_f_calls::Int = 0)
-    t0 = time()
-    θde, Jde, de_evals = de_search(f_eval, layout; de_budget = de_budget, seed = seed, trace = trace)
-    θ = collect(Float64.(θde))
+"Общая NM-полировка по уровням эпох (дедуп invert_single/invert_workers/polish_from):
+модифицирует θ на месте, возвращает число NM-оценок. f_eval(θfull) -> J."
+function polish_nm!(f_eval, layout::ThetaLayout, θ::Vector{Float64};
+                    multilevel::Bool = true, nm_iterations::Int = 200, max_f_calls::Int = 0)
     nm_evals = 0
     levels = multilevel ? collect(1:length(layout.epochs)) : [length(layout.epochs)]
     for level in levels
@@ -162,6 +159,18 @@ function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool =
         θ[idx] .= Optim.minimizer(res)
         nm_evals += Optim.f_calls(res)
     end
+    return nm_evals
+end
+
+"Одна инверсия: DE по всему θ → NM-полировка по уровням эпох. f_eval(θ) -> J."
+function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool = true,
+                       seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
+                       max_f_calls::Int = 0)
+    t0 = time()
+    θde, Jde, de_evals = de_search(f_eval, layout; de_budget = de_budget, seed = seed, trace = trace)
+    θ = collect(Float64.(θde))
+    nm_evals = polish_nm!(f_eval, layout, θ; multilevel = multilevel,
+                          nm_iterations = nm_iterations, max_f_calls = max_f_calls)
     return θ, de_evals, nm_evals, time() - t0
 end
 
@@ -183,26 +192,8 @@ function invert_workers(obj::Objective; de_budget::Int = 4000, multilevel::Bool 
     t0 = time()
     θde, Jde, de_evals = de_search(worker_J, obj.layout; de_budget = de_budget, seed = seed, trace = trace)
     θ = collect(Float64.(θde))
-    nm_evals = 0
-    levels = multilevel ? collect(1:length(obj.layout.epochs)) : [length(obj.layout.epochs)]
-    for level in levels
-        idx = level_indices(obj.layout, level)
-        θstart = copy(θ)
-        active = fill(false, length(θ)); active[idx] .= true
-        θstart[.!active] .= obj.layout.x0[.!active]
-        fsub(θsub) = begin
-            θfull = copy(θstart)
-            θfull[idx] .= θsub
-            obj(θfull)[1]                       # NM — последовательный, на главном
-        end
-        res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
-                             Fminbox(NelderMead()),
-                             Optim.Options(iterations = nm_iterations,
-                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : typemax(Int),
-                                           x_abstol = 1e-6, f_abstol = 1e-6))
-        θ[idx] .= Optim.minimizer(res)
-        nm_evals += Optim.f_calls(res)
-    end
+    nm_evals = polish_nm!(θ -> obj(θ)[1], obj.layout, θ; multilevel = multilevel,
+                          nm_iterations = nm_iterations, max_f_calls = max_f_calls)
     merge_worker_caches!(obj)
     J, info = obj(θ)
     return InversionResult(θ, J, info.J_T, info.J_Ro, info.J_reg,
@@ -321,26 +312,8 @@ function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 
     t0 = time()
     θ = collect(Float64.(θ0))
     length(θ) == length(obj.layout) || error("theta0 length mismatch")
-    nm_evals = 0
-    levels = multilevel ? collect(1:length(obj.layout.epochs)) : [length(obj.layout.epochs)]
-    for level in levels
-        idx = level_indices(obj.layout, level)
-        θstart = copy(θ)
-        active = fill(false, length(θ)); active[idx] .= true
-        θstart[.!active] .= obj.layout.x0[.!active]
-        fsub(θsub) = begin
-            θfull = copy(θstart)
-            θfull[idx] .= θsub
-            obj(θfull)[1]
-        end
-        res = Optim.optimize(fsub, obj.layout.lower[idx], obj.layout.upper[idx], θstart[idx],
-                             Fminbox(NelderMead()),
-                             Optim.Options(iterations = nm_iterations,
-                                           f_calls_limit = max_f_calls > 0 ? max_f_calls : typemax(Int),
-                                           x_abstol = 1e-6, f_abstol = 1e-6))
-        θ[idx] .= Optim.minimizer(res)
-        nm_evals += Optim.f_calls(res)
-    end
+    nm_evals = polish_nm!(θ -> obj(θ)[1], obj.layout, θ; multilevel = multilevel,
+                          nm_iterations = nm_iterations, max_f_calls = max_f_calls)
     J, info = obj(θ)
     return InversionResult(θ, J, info.J_T, info.J_Ro, info.J_reg,
                            0, nm_evals, time() - t0, 0)
