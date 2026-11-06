@@ -11,6 +11,7 @@
 using ArgParse
 using NPZ
 using Distributed
+using LinearAlgebra
 
 include(joinpath(@__DIR__, "parameterized_data.jl"))
 include(joinpath(@__DIR__, "ro_kinetics.jl"))
@@ -26,7 +27,7 @@ function parse_cli()
         "--wells"         ; required = true; help = "semicolon-separated XLSX/JSON paths"
         "--grid"          ; default = "50,60"; help = "nx,nz of the working grid"
         "--ensemble"      ; arg_type = Int; default = 4
-        "--workers"       ; arg_type = Int; default = 4
+        "--workers"       ; arg_type = Int; default = 0   # 0 = авто: все логические ядра
         "--de-budget"     ; arg_type = Int; default = 4000
         "--nm-iterations" ; arg_type = Int; default = 200
         "--sigma-T"       ; arg_type = Float64; default = 2.0
@@ -88,12 +89,19 @@ function main()
                        picard_tolerance_c = args["picard-tol"],
                        pcg_tolerance = args["pcg-tol"])
 
+    args["workers"] == 0 && (args["workers"] = Int(Sys.CPU_THREADS))
+    # процесс-параллелизм: по одному потоку на процесс, BLAS-потоки в 1 —
+    # иначе W процессов × N BLAS-потоков переполняют ядра (oversubscription)
+    LinearAlgebra.BLAS.set_num_threads(1)
     # воркеры: каждый со своим датасетом и кэшем
     if args["workers"] > 1 && nprocs() == 1
         addprocs(args["workers"] - 1)
         for f in ("parameterized_data.jl", "ro_kinetics.jl", "observations.jl",
                   "objective.jl", "criteria.jl", "invert.jl")
             @everywhere include(joinpath($(@__DIR__), $f))
+        end
+        for pr in procs()
+            remotecall_fetch(LinearAlgebra.BLAS.set_num_threads, pr, 1)
         end
         data_dir_abs = abspath(args["data-dir"])
         epochs = parse_epochs(args["epochs"])
@@ -143,25 +151,76 @@ function main()
                               cache_dir = joinpath(cache_dir, "c2f_coarse"))
         println("C2F: coarse grid $(cnx)x$(cnz), DE budget $cde; fine $(nx)x$(nz)")
         # воркеры и главный — под грубую сетку (кэш воркеров — свой cache_dir)
-        if nprocs() > 1
+        c2f_stages = C2fStage[]
+        if nprocs() > 1 && args["ensemble"] >= nworkers()
+            # стартов >= воркеров: старт целиком на воркере (coarse + fine за одну
+            # инициализацию), все ядра заняты волнами, NM перекрыт
+            # воркеры: coarse + fine Objective за один remotecall (кэши раздельны),
+            # старт ансамбля выполняется на воркере целиком без переинициализаций
             data_dir_abs = abspath(args["data-dir"])
             epochs = parse_epochs(args["epochs"])
-            c2f_stage_init!(worker_init!, data_dir_abs, wells, epochs,
-                            args["n-nodes"], args["mid-x"], cnx, cnz;
-                            reg = args["reg"], weight_ro = args["weight-ro"],
-                            cache_dir = joinpath(out_dir, "cache_w_coarse"),
-                            max_dt_ma = args["max-dt-ma"],
-                            picard_iterations = args["picard-iters"],
-                            pcg_tolerance = args["pcg-tol"],
-                            nodes_x = node_xs)
+            for w in workers()
+                remotecall_fetch(worker_init_c2f!, w, data_dir_abs, wells, epochs,
+                                 args["n-nodes"], args["mid-x"];
+                                 coarse_nx = cnx, coarse_nz = cnz,
+                                 coarse_cache_dir = joinpath(out_dir, "cache_w_coarse$w"),
+                                 fine_nx = nx, fine_nz = nz,
+                                 fine_cache_dir = joinpath(out_dir, "cache_w$w"),
+                                 nodes_x = node_xs,
+                                 reg = args["reg"], weight_ro = args["weight-ro"],
+                                 max_dt_ma = args["max-dt-ma"],
+                                 picard_iterations = args["picard-iters"],
+                                 picard_tolerance_c = args["picard-tol"],
+                                 pcg_tolerance = args["pcg-tol"])
+            end
+            results, c2f_stages = invert_ensemble_c2f(cobj, obj;
+                                                      ensemble = args["ensemble"],
+                                                      de_budget = cde,
+                                                      nm_iterations = args["nm-iterations"],
+                                                      multilevel = !args["no-multilevel"],
+                                                      seed0 = args["seed"],
+                                                      max_f_calls = args["max-f-calls"])
+            best = first(results)
+            c2f_stage = first(c2f_stages)    # coarse-стадия best-старта
+        elseif nprocs() > 1 && args["ensemble"] > 1
+            # стартов меньше воркеров: DE каждого старта pmap'ит по всем воркерам,
+            # старты последовательно (полное заполнение ядер в DE-фазе)
+            results = InversionResult[]
+            for st_i in 1:args["ensemble"]
+                r, stg = invert_c2f(cobj, obj; de_budget = cde,
+                                    nm_iterations = args["nm-iterations"],
+                                    multilevel = !args["no-multilevel"],
+                                    seed = args["seed"] + st_i - 1,
+                                    max_f_calls = args["max-f-calls"])
+                push!(results, r)
+                push!(c2f_stages, stg)
+                println(@sprintf("C2F ensemble start %d/%d (seed %d): J=%.1f",
+                                 st_i, args["ensemble"], args["seed"] + st_i - 1, r.J))
+            end
+            sort!(results; by = r -> r.J)
+            best = first(results)
+            c2f_stage = c2f_stages[findfirst(st -> st.seed == best.seed, c2f_stages)]
+        else
+            if nprocs() > 1
+                data_dir_abs = abspath(args["data-dir"])
+                epochs = parse_epochs(args["epochs"])
+                c2f_stage_init!(worker_init!, data_dir_abs, wells, epochs,
+                                args["n-nodes"], args["mid-x"], cnx, cnz;
+                                reg = args["reg"], weight_ro = args["weight-ro"],
+                                cache_dir = joinpath(out_dir, "cache_w_coarse"),
+                                max_dt_ma = args["max-dt-ma"],
+                                picard_iterations = args["picard-iters"],
+                                pcg_tolerance = args["pcg-tol"],
+                                nodes_x = node_xs)
+                _WORKER_OBJ[] = cobj
+            end
             _WORKER_OBJ[] = cobj
+            best, c2f_stage = invert_c2f(cobj, obj; de_budget = cde,
+                                         nm_iterations = args["nm-iterations"],
+                                         multilevel = !args["no-multilevel"],
+                                         seed = args["seed"], max_f_calls = args["max-f-calls"])
+            results = [best]
         end
-        _WORKER_OBJ[] = cobj
-        best, c2f_stage = invert_c2f(cobj, obj; de_budget = cde,
-                                     nm_iterations = args["nm-iterations"],
-                                     multilevel = !args["no-multilevel"],
-                                     seed = args["seed"], max_f_calls = args["max-f-calls"])
-        results = [best]
         # drift-check: J на грубой и рабочей сетке при одном θ_coarse. Уровни J
         # напрямую несравнимы (смещение дискретизации) — индикатор расхождения.
         if c2f_stage !== nothing
@@ -282,9 +341,12 @@ function main()
         "layout" => OrderedDict("names" => layout.names, "nodes_x" => layout.nodes_x,
                                 "epochs" => [collect(e) for e in layout.epochs],
                                 "lower" => layout.lower, "upper" => layout.upper),
-        "settings" => OrderedDict(k => args[k] for k in
-            ("ensemble", "workers", "de-budget", "nm-iterations", "sigma-T", "sigma-Ro",
-             "seed", "reg", "weight-ro", "no-multilevel")),
+        "settings" => merge(
+            OrderedDict(k => args[k] for k in
+                ("ensemble", "workers", "de-budget", "nm-iterations", "sigma-T", "sigma-Ro",
+                 "seed", "reg", "weight-ro", "no-multilevel")),
+            OrderedDict("ensemble_mode" =>
+                (nprocs() > 1 && args["ensemble"] >= nworkers()) ? "parallel" : "serial")),
         "observations" => wellset_summary(wells),
         "n_dropped_T_inactive" => obj.n_dropped_T,
         "ensemble" => [OrderedDict(
@@ -316,6 +378,11 @@ function main()
                                      "elapsed_s" => c2f_stage.elapsed_s,
                                      "seed" => c2f_stage.seed),
             "J_fine_at_theta_coarse" => obj(c2f_stage.theta)[1])
+        if !isempty(c2f_stages)
+            solution["c2f"]["stage_A_ensemble"] = [OrderedDict(
+                "J" => st.J, "de_evals" => st.de_evals, "seed" => st.seed)
+                for st in c2f_stages]
+        end
     end
     if adaptive_rep !== nothing
         solution["adaptive"] = OrderedDict(

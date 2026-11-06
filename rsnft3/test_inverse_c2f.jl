@@ -73,6 +73,95 @@ else
     println("SKIP worker-mode test (run with julia -p 2)")
 end
 
+# --- 6. ансамбль параллельно: детерминизм (старт-целиком-на-воркере == старты
+# по одному на воркере, побитово, включая de_evals) ---
+if nprocs() > 1
+    fine_cfg = SolverConfig(nx = 30, nz = 60, max_dt_ma = 5.0,
+                            picard_iterations = 2, picard_tolerance_c = 1.0e-2)
+    for w in workers()
+        remotecall_fetch(worker_setup, w, obj_fine.data, wells, fine_cfg, lay;
+                         cache_dir = joinpath(cachedir, "ens_w$w"))
+    end
+    ens_kwargs = (de_budget = 60, multilevel = false, nm_iterations = 5, seed0 = 7)
+    par = invert_ensemble_parallel(obj_fine; ensemble = 2, ens_kwargs...)
+    check("ensemble parallel: count", length(par) == 2)
+    check("ensemble parallel: J finite", all(isfinite(r.J) && r.J > 0 for r in par))
+    check("ensemble parallel: sorted by J", issorted(r.J for r in par))
+    check("ensemble parallel: best is first", par[1].J <= par[2].J)
+    # базовая линия: те же старты по одному на воркере 2, последовательно
+    seq = [remotecall_fetch(invert_start_on_worker, workers()[1],
+                            (de_budget = 60, multilevel = false,
+                             seed = 7 + s, nm_iterations = 5,
+                             trace = false, max_f_calls = 0))
+           for s in 0:1]
+    by_seed_par = Dict(r.seed => r for r in par)
+    for r in seq
+        b = get(by_seed_par, r.seed, nothing)
+        check("ensemble parallel: seed $(r.seed) present", b !== nothing)
+        b === nothing && continue
+        check("ensemble parallel: seed $(r.seed) theta bit-identical",
+              length(b.theta) == length(r.theta) &&
+              all(b.theta .== r.theta))
+        check("ensemble parallel: seed $(r.seed) J bit-identical", b.J == r.J)
+        check("ensemble parallel: seed $(r.seed) de_evals match (no pmap from worker)",
+              b.de_evals == r.de_evals)
+    end
+    # воспроизводимость: второй параллельный прогон — те же значения
+    par2 = invert_ensemble_parallel(obj_fine; ensemble = 2, ens_kwargs...)
+    check("ensemble parallel: reproducible",
+          [r.J for r in par] == [r.J for r in par2] &&
+          all(par[i].theta == par2[i].theta for i in 1:2))
+else
+    println("SKIP ensemble parallel tests (run with julia -p 2)")
+end
+
+# --- 7. c2f-ансамбль параллельно: воркер держит coarse + fine, старт целиком;
+# результат каждого seed совпадает с одиночным запуском той же функции ---
+if nprocs() > 1
+    epochs_c2f = [(200.0, 100.0), (100.0, 35.0), (35.0, 10.0), (10.0, 0.0)]
+    for w in workers()
+        remotecall_fetch(worker_init_c2f!, w, DATA_DIR, wells, epochs_c2f,
+                         0, 0.0;
+                         nodes_x = lay.nodes_x,
+                         coarse_nx = 12, coarse_nz = 20,
+                         coarse_cache_dir = joinpath(cachedir, "c2f_ens_w_coarse$w"),
+                         fine_nx = 30, fine_nz = 60,
+                         fine_cache_dir = joinpath(cachedir, "c2f_ens_w_fine$w"),
+                         reg = 0.1, max_dt_ma = 5.0,
+                         picard_iterations = 2, picard_tolerance_c = 1.0e-2)
+    end
+    c2f_kwargs = (de_budget = 60, nm_iterations = 5, multilevel = false, seed0 = 11)
+    results_ens, stages_ens = invert_ensemble_c2f(obj_coarse, obj_fine;
+                                                  ensemble = 2, c2f_kwargs...)
+    check("c2f ensemble: counts", length(results_ens) == 2 && length(stages_ens) == 2)
+    check("c2f ensemble: seeds = seed0..seed0+E-1",
+          Set(r.seed for r in results_ens) == Set(11:12))
+    check("c2f ensemble: results sorted by J", issorted(r.J for r in results_ens))
+    check("c2f ensemble: stages sorted like results",
+          [s.seed for s in stages_ens] == [r.seed for r in results_ens])
+    check("c2f ensemble: J finite", all(isfinite(r.J) && r.J > 0 for r in results_ens))
+    best_res, best_stage = results_ens[1], stages_ens[1]
+    Jf_c, _ = obj_fine(best_stage.theta)
+    check("c2f ensemble: polished J <= J_fine at theta_coarse",
+          best_res.J <= Jf_c + 1e-9)
+    # базовая линия: одиночный c2f-старт на воркере тем же seed — побитово
+    br, bs = remotecall_fetch(invert_start_c2f_on_worker, workers()[1],
+                              (de_budget = 60, nm_iterations = 5,
+                               multilevel = false, seed = 11,
+                               trace = false, max_f_calls = 0))
+    i11 = findfirst(r -> r.seed == 11, results_ens)
+    check("c2f ensemble: seed 11 present", i11 !== nothing)
+    i11 === nothing && (i11 = 1)
+    cand, cand_stage = results_ens[i11], stages_ens[i11]
+    check("c2f ensemble: seed 11 theta bit-identical to single start",
+          all(cand.theta .== br.theta))
+    check("c2f ensemble: seed 11 J bit-identical to single start", cand.J == br.J)
+    check("c2f ensemble: seed 11 de_evals match (no pmap from worker)",
+          cand_stage.de_evals == bs.de_evals)
+else
+    println("SKIP c2f ensemble tests (run with julia -p 2)")
+end
+
 println()
 if failures == 0
     println("ALL PASS")
