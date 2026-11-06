@@ -198,7 +198,7 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
                      t_targets, ro_targets, n_dropped, Ref(0), Ref(0),
                      cache, cache_path, bytes2hex(sha256(JSON.json(ctx)))[1:16], Ref(0),
-                     geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
+                     Ref(0), geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
 end
 
 "θ → qbasal (Вт/м²) на x-сетке прогона для каждого возраста; эквивалент
