@@ -1,121 +1,148 @@
-# run_adaptive — запуск адаптивного расчёта одной командой
+# Скрипты запуска и HTML-отчёт
 
-Два эквивалентных скрипта-обёртки над `run_inverse.jl` (адаптивный бэкенд) +
-`report_inverse.jl`:
+## Что здесь
 
-| Скрипт | Платформа |
-|---|---|
-| `run_adaptive.ps1` | Windows PowerShell (5.1+) |
-| `run_adaptive.sh` | Linux / macOS / любой POSIX shell (bash) |
+| Скрипт | Windows | Linux / macOS | Что делает |
+|---|---|---|---|
+| Прямая задача + отчёт | `run_forward.ps1` | `run_forward.sh` | прогон солвера → отчёт секции «Прямая задача» |
+| Прямая + обратная + отчёт | `run_full.ps1` | `run_full.sh` | прямой прогон + инверсия `run_inverse.jl` → единый отчёт |
+| Адаптивная инверсия | `run_adaptive.ps1` | `run_adaptive.sh` | прежний сценарий (адаптивный бэкенд инверсии), отчёт — секция «Обратная задача» |
 
-После прогона печатается сводка приёмочных метрик из `solution.json` и пути артефактов.
-Параметры у обоих совпадают (см. таблицу ниже); отличаются только имена флагов:
-PowerShell `-Grid 30,60` ↔ bash `--grid 30,60`.
+**Основной режим — адаптивная сетка.** Прямая задача считается адаптивным
+солвером (`adaptive_basin_fvm.jl`, quadtree-измельчение у границ слоёв),
+инверсия в `run_full` включает контроль на адаптивной сетке
+(`run_inverse.jl --adaptive-final`). Флаг `--uniform` / `-Uniform`
+переключает на классические равномерные сетки (`basin_fvm.jl`).
 
-## Быстрый старт
+Отчёт собирает **`rsnft3/report_full.jl`** — один самодостаточный HTML-файл
+на русском языке с интерактивными графиками (Plotly встроен в файл, отчёт
+открывается офлайн, без интернета). Состав секций зависит от флагов:
+`--direct` → секция «Прямая задача», `--inverse` → секция «Обратная задача»,
+оба флага → один общий отчёт с оглавлением.
 
-Из корня репозитория (PowerShell):
+## Требования
+
+- Julia 1.9+ (проверено на 1.13), окружение `rsnft3/Project.toml`
+  (`julia --project=rsnft3`).
+- Дополнительных пакетов не нужно: plotly.min.js лежит в `rsnft3/report/`
+  и встраивается в отчёт при генерации.
+- Папки с данными в корне репозитория (как есть сейчас):
+  - `Данные_для_прямой_задачи/` — варианты `data1`, `data2` (XLSX прямой задачи);
+  - `Данные для обратной задачи/` — скважинные данные
+    (`TemperatureWellData.xlsx`, `VitriniteWellData.xlsx`, …).
+
+Если папки лежат в другом месте — передайте их флагами (`--data-dir`,
+`--inv-data-dir`, `--wells`), ничего перемещать не нужно.
+
+## run_forward — прямая задача с отчётом
+
+PowerShell (из корня репозитория):
 
 ```powershell
-# контрольный прогон по умолчанию: поиск 20x40 + адаптивный контроль b16x32 L2
-.\rsnft3\scripts\run_adaptive.ps1
-
-# полностью адаптивный конвейер (поиск тоже на адаптивной сетке)
-.\rsnft3\scripts\run_adaptive.ps1 -Mode search -AdaptiveBase 16,32 -AdaptiveLevel 1
-
-# рабочий прогон 30x60 + адаптив 30x60 L1, отчёт открыть в браузере
-.\rsnft3\scripts\run_adaptive.ps1 -Grid 30,60 -AdaptiveBase 30,60 -AdaptiveLevel 1 -OpenReport
+.\rsnft3\scripts\run_forward.ps1                        # адаптивная сетка (base 16x32, level 2)
+.\rsnft3\scripts\run_forward.ps1 -AdaptiveBase 30,60 -AdaptiveLevel 1
+.\rsnft3\scripts\run_forward.ps1 -Uniform -Nx 30 -Nz 60 -Force  # равномерная 30x60
+.\rsnft3\scripts\run_forward.ps1 -DataDir "C:\путь\к\данным" -OpenReport
 ```
+
+Bash:
+
+```bash
+./rsnft3/scripts/run_forward.sh                        # адаптивная сетка (base 16x32, level 2)
+./rsnft3/scripts/run_forward.sh --adaptive-base 30,60 --adaptive-level 1
+./rsnft3/scripts/run_forward.sh --uniform --nx 30 --nz 60 --force
+./rsnft3/scripts/run_forward.sh --data-dir ../Данные_для_прямой_задачи/data2 --open
+```
+
+Флаги (PowerShell ↔ bash): `-DataDir/--data-dir`,
+`-AdaptiveBase/--adaptive-base` (базовая сетка адаптивного солвера, `16,32`),
+`-AdaptiveLevel/--adaptive-level` (уровень измельчения, `2`),
+`-Uniform/--uniform`, `-Nx/--nx`, `-Nz/--nz` (только с `-Uniform/--uniform`),
+`-MaxDtMa/--max-dt-ma`, `-PicardIters/--picard-iters`, `-Out/--out`,
+`-Force/--force`, `-OpenReport/--open`.
+
+Что получается:
+- `results/<run_id>/result.npz`, `metadata.json` — кэш прогона солвера;
+- `results/report_forward_<время>/report.html` — отчёт.
+
+## run_full — прямая + обратная задачи с общим отчётом
+
+PowerShell:
+
+```powershell
+.\rsnft3\scripts\run_full.ps1 -Grid 30,60 -DeBudget 200    # быстрый контрольный прогон
+.\rsnft3\scripts\run_full.ps1 -Twin -Q 75,80,85,90         # twin-режим
+.\rsnft3\scripts\run_full.ps1 -Ensemble 4 -Workers 4 -DeBudget 8000  # рабочий прогон
+```
+
+Bash:
+
+```bash
+./rsnft3/scripts/run_full.sh --grid 30,60 --de-budget 200
+./rsnft3/scripts/run_full.sh --twin --q 75,80,85,90
+./rsnft3/scripts/run_full.sh --ensemble 4 --workers 4 --de-budget 8000
+```
+
+Флаги (PowerShell ↔ bash):
+
+| PowerShell | Bash | По умолчанию | Смысл |
+|---|---|---|---|
+| `-DataDir` | `--data-dir` | `<repo>/Данные_для_прямой_задачи/data1` | данные прямой задачи |
+| `-InvDataDir` | `--inv-data-dir` | `<repo>/Данные для обратной задачи` | данные для инверсии |
+| `-Wells` | `--wells` | Temperature+Vitrinite XLSX из `--inv-data-dir` | скважины, через `;` |
+| `-Twin` | `--twin` | выкл | сгенерировать twin-наблюдения перед инверсией |
+| `-Q` | `--q` | `75,80,85,90` | истинный q для twin (значение на эпоху) |
+| `-Grid` | `--grid` | `20,40` | рабочая сетка инверсии `nx,nz` |
+| `-Base` | `--base` | `16,32` | адаптивная база прямой задачи |
+| `-Level` | `--level` | `2` | адаптивный уровень прямой задачи |
+| `-AdaptiveBase` | `--adaptive-base` | `16,32` | адаптивная база инверсии |
+| `-AdaptiveLevel` | `--adaptive-level` | `2` | адаптивный уровень инверсии |
+| `-Uniform` | `--uniform` | выкл | равномерные сетки вместо адаптивных |
+| `-Nx` / `-Nz` | `--nx` / `--nz` | `60` / `120` | сетка равномерной прямой задачи (только с `-Uniform`) |
+| `-Ensemble` | `--ensemble` | `1` | число стартов ансамбля |
+| `-Workers` | `--workers` | `1` | параллельные воркеры |
+| `-DeBudget` | `--de-budget` | `2000` | бюджет оценок DE |
+| `-NmIterations` | `--nm-iterations` | `30` | итерации NM-полировки |
+| `-SigmaT` / `-SigmaRo` | `--sigma-T` / `--sigma-Ro` | `2.0` / `0.05` | шумы наблюдений |
+| `-Reg` | `--reg` | `1.0` | вес регуляризации |
+| `-Seed` | `--seed` | `1` | зерно генератора |
+| `-Theta0File` | `--theta0-file` | нет | solution.json для полировки без DE |
+| `-Out` | `--out` | `results/report_full_<время>` | каталог результатов |
+| `-Force` | `--force` | выкл | пересчитать прямой прогон из кэша |
+| `-OpenReport` | `--open` | выкл | открыть отчёт в браузере |
+
+Что получается в `results/report_full_<время>/`:
+- `report.html` — единый отчёт (обе секции + оглавление);
+- `inverse/solution.json`, `inverse/result.npz` — результат инверсии;
+- `twin_grid.json` (в twin-режиме) — сгенерированные наблюдения.
+
+## Отчёт напрямую (без скриптов)
+
+```bash
+cd rsnft3
+julia --project=. report_full.jl --direct ../results/<run_id>            # только прямая
+julia --project=. report_full.jl --inverse ../results/<inverse_run>      # только обратная
+julia --project=. report_full.jl --direct ... --inverse ... --out my.html  # общий
+```
+
+Каталог `--direct` должен содержать `result.npz` (и `metadata.json`);
+каталог `--inverse` — `solution.json` (и `result.npz`).
+
+## Содержимое отчёта
+
+- **Прямая задача**: сводка прогона (сетка/адаптивная база, шаги, время, min/max T);
+  температурное поле T(x,z) со слайдером по эпохам; термические профили
+  в колонках; геометрия бассейна (поверхность/кровля фундамента);
+  литология; пористость.
+- **Обратная задача**: вердикт по условию 18 (RMSE ≤ 2σ, ≥95% точек в 2σ);
+  восстановленный поток q(x,t) heatmap + таблица; профили T и Ro по скважинам
+  (модель против наблюдений с ±σ); ансамбль решений (разброс θ, вклады
+  в функционал); настройки прогона.
+
+## Ошибки запуска PowerShell
 
 При первом запуске, если политика выполнения запрещает скрипты:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\rsnft3\scripts\run_adaptive.ps1
+powershell -ExecutionPolicy Bypass -File .\rsnft3\scripts\run_full.ps1
 ```
-
-## Режимы
-
-| Режим | Что делает |
-|---|---|
-| `-Mode final` (по умолч.) | поиск на равномерной сетке `-Grid`, затем адаптивный контроль при лучшем θ̂ (`--adaptive-final`) |
-| `-Mode search` | весь конвейер на адаптивной сетке (`--adaptive-search`), равномерная сетка не используется |
-
-## Основные параметры
-
-Имена — в формате PowerShell; в bash те же имена с `--` и дефисами:
-`-Grid` ↔ `--grid`, `-AdaptiveBase` ↔ `--adaptive-base`, `-SigmaT` ↔ `--sigma-T`,
-`-MaxDtMa` ↔ `--max-dt-ma`, `-PcgTol` ↔ `--pcg-tol`, `-NoReport` ↔ `--no-report`,
-`-FrozenMesh` ↔ `--frozen-mesh` и т.д.
-
-| Параметр | По умолчанию | Смысл |
-|---|---|---|
-| `-Grid` | `20,40` | равномерная сетка поиска nx,nz |
-| `-AdaptiveBase` | `16,32` | базовый грид quadtree |
-| `-AdaptiveLevel` | `2` | макс. уровень измельчения (0..5) |
-| `-AdaptivePreview` | `120,160` | растеризация для выборки наблюдений |
-| `-Theta0File` | — | `solution.json` для полировки с готового θ̂ (DE пропускается) |
-| `-Ensemble` / `-Workers` | 1 / 1 | число стартов DE / воркеров Julia |
-| `-DeBudget` / `-NmIterations` | 2000 / 30 | бюджет DE / итерации NM |
-| `-Reg` | 1.0 | вес регуляризации (для twin ставьте 0) |
-| `-Seed` | 1 | seed |
-| `-SigmaT` / `-SigmaRo` | 2.0 / 0.05 | СКВО шума наблюдений |
-| `-MaxDtMa` | 2.5 | шаг решателя, Ma |
-| `-PcgTol` | `1e-4` | точность PCG (главный рычаг скорости) |
-| `-Threads` | 8 | потоки Julia (`-t`) |
-| `-FrozenMesh` | выкл | эксперимент.: меш строится один раз |
-| `-OutDir` | `results/adaptive_<mode>_<время>` | каталог результата |
-| `-DataDir` / `-Wells` | автоподстановка | каталог данных / список XLSX через `;` |
-| `-NoReport` | выкл | не генерировать report.html |
-| `-OpenReport` | выкл | открыть отчёт в браузере после прогона |
-
-## Что получается на выходе
-
-В `-OutDir`:
-
-- `solution.json` — лучшее θ̂, breakdown J, критерии, блок `adaptive`;
-- `result.npz` (и `result_adaptive.npz` в режиме `-Mode search`) — поля прогона;
-- `mesh_adaptive.png` — картинка адаптивного меша с температурой;
-- `report.html` — HTML-отчёт (если не указан `-NoReport`).
-
-В консоли в конце печатается сводка:
-
-```
-=== summary ===
-status   : ok
-rmse_T   : 3.44   (accept: <= 4 = 2*sigma_T)
-rmse_Ro  : 0.031  (accept: <= 0.10)
-T in 2s  : 96.3%  (accept: >= 95%)
-adaptive : base=16,32 level=2  rmse_T=3.40  ...
-theta    : 105.3, 118.9, ... , 59.8
-mesh     : ...\results\adaptive_final_20260101_120000\mesh_adaptive.png
-total    : 00:03:12
-```
-
-## Типовые сценарии
-
-```powershell
-# 1. Быстрая разведка (~2-3 мин)
-.\rsnft3\scripts\run_adaptive.ps1
-
-# 2. Полировка с готового θ̂ + адаптивный контроль
-.\rsnft3\scripts\run_adaptive.ps1 -Theta0File results\inverse_final\solution.json -NmIterations 10
-
-# 3. Twin-проверка на адаптиве (важно: -Reg 0)
-.\rsnft3\scripts\run_adaptive.ps1 -Mode search -Reg 0 -Wells results\twin\twin.json
-
-# 4. Параллельный поиск (воркеры окупаются при >= 0.15 c/оценку, т.е. на 30x60 и крупнее)
-.\rsnft3\scripts\run_adaptive.ps1 -Grid 30,60 -Ensemble 4 -Workers 4 -DeBudget 6000
-```
-
-## Замечания
-
-- Каталог данных по умолчанию: `<repo>/Данные для обратной задачи`; колодцы —
-  `TemperatureWellData.xlsx;VitriniteWellData.xlsx`. Переопределяется `-DataDir` / `-Wells`.
-- Скрипт проверяет наличие `rsnft3/Project.toml`, `julia` на PATH, каталога данных и
-  `-Theta0File` до запуска; ненулевой код возврата Julia прерывает выполнение.
-- Дробные параметры передаются в Julia через InvariantCulture (ps1) / как есть (sh) —
-  скрипты безопасны при любой региональной настройке.
-- `results/` в `.gitignore`: выводы фиксируйте текстом коммитов, а не файлами.
-- Скрипты не пушат и не коммитят ничего сами.
-- В Windows Git-Bash запускать не рекомендуется: Julia-бинарник Windows не понимает
-  `/c/...`-пути; на Windows используйте `run_adaptive.ps1`, на Linux — `run_adaptive.sh`.
