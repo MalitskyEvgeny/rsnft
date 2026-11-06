@@ -55,7 +55,7 @@ function parse_cli()
         "--adaptive-preview"; default = "120,160"; help = "adaptive preview grid nx,nz for observation sampling"
         "--c2f"           ; action = :store_true; help = "coarse-to-fine: DE on a coarse grid, NM polish on the working grid"
         "--c2f-grid"      ; default = "20,40"; help = "coarse nx,nz (with --c2f)"
-        "--c2f-de-budget" ; arg_type = Int; default = 0; help = "DE budget on the coarse grid (0 = same as --de-budget)"
+        "--c2f-de-budget" ; arg_type = Int; default = 0; help = "DE budget on the coarse grid (0 = 25% of --de-budget, recommended: stage A needs far fewer evals than polish)"
         "--adaptive-frozen"; action = :store_true; help = "build the adaptive mesh once on the final stratigraphy (no per-substep rebuild/remap)"
         "--out"           ; required = true
     end
@@ -142,7 +142,9 @@ function main()
     if args["c2f"]
         # Stage A (coarse): DE на грубой regular-сетке; layout тот же.
         cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
-        cde = args["c2f-de-budget"] > 0 ? args["c2f-de-budget"] : args["de-budget"]
+        # 2.7: грубая стадия исторически в ~7 раз дольше полировки — дефолт 25%
+        cde = args["c2f-de-budget"] > 0 ? args["c2f-de-budget"] : cld(args["de-budget"], 4)
+        args["c2f-de-budget"] == args["de-budget"] && @warn "c2f: задан полный DE-бюджет для грубой сетки - обычно достаточно 25%"
         ccfg = SolverConfig(nx = cnx, nz = cnz, max_dt_ma = args["max-dt-ma"],
                             picard_iterations = args["picard-iters"],
                             picard_tolerance_c = args["picard-tol"],
@@ -392,7 +394,7 @@ function main()
         cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
         solution["c2f"] = OrderedDict(
             "coarse_grid" => OrderedDict("nx" => cnx, "nz" => cnz),
-            "coarse_de_budget" => args["c2f-de-budget"] > 0 ? args["c2f-de-budget"] : args["de-budget"],
+            "coarse_de_budget" => cde,
             "stage_A" => OrderedDict("theta" => c2f_stage.theta, "J" => c2f_stage.J,
                                      "de_evals" => c2f_stage.de_evals,
                                      "elapsed_s" => c2f_stage.elapsed_s,
