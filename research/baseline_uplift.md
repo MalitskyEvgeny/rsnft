@@ -64,3 +64,6 @@ julia --project=. run_inverse.jl --data-dir "../Данные для обратн
 ## Review 2 (Phase 2) — BLOCK -> исправлено
 - P1 (исправлен, 730ab94): ctx_hash не покрывал sigma/таргеты/допуски solver — повторный запуск с другим sigma-T в тот же out молча переиспользовал устаревший J. Добавлены таргеты, max_dt_ma, picard/pcg, adaptive_cfg; J_CACHE_VERSION=3.
 - P2 (бэклог): (1) c2f serial-ветка ensemble<nworkers: stage A идёт на fine-сетке воркеров (нет пере-инициализации под coarse) — дефект до Phase 2, результаты корректны; (2) запись J_fine_at_theta_coarse и кэши weight-ro-cal идут после финального forced cache_save — последние оценки могут не попасть в JSON; (3) test-покрытие cache нет (тесты заморожены).
+
+## Smoke Phase 3
+Коммиты 56918c1..5639e5e (3.1-3.7 + фиксы config_check). Прогон: J=24412.75 (совпадает с Phase 1/2 — регрессии нет), elapsed=155.8s. Проверено: фатальная валидация exit(1) с понятным сообщением на отсутствующем data-dir; warnings вместо фатальных ошибок для wells-файлов в каталоге данных.
