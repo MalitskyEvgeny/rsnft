@@ -47,8 +47,8 @@ cachedir = joinpath(tempdir(), "b3_cache_test")
 rm(cachedir; force = true, recursive = true)
 Jfun = make_objective(d, wells, cfg, lay; reg = 0.1, weight_ro = 1.0, cache_dir = cachedir)
 
-check("T targets: 487 (499 − 12 в неактивных ячейках)", n_targets(Jfun, :T) == 487)
-check("dropped T points == 12", Jfun.n_dropped_T == 12)
+check("T targets: 491 (499 − 8 вырожденных стенсилов, конвенция 73810e4)", n_targets(Jfun, :T) == 491)
+check("dropped T points == 8", Jfun.n_dropped_T == 8)
 check("Ro targets: 49", n_targets(Jfun, :Ro) == 49)
 
 θt = theta_constant(lay, [75.0, 80.0, 85.0, 90.0])
@@ -57,7 +57,8 @@ check("J finite and positive", isfinite(J1) && J1 > 0)
 check("info breakdown consistent", abs(info1.J_T + Jfun.weight_ro * info1.J_Ro + info1.J_reg - J1) < 1e-6 * J1)
 J2, info2 = Jfun(θt)
 check("cache: second call cached", info2.cached && J2 == J1)
-check("cache JSON dumped", isfile(joinpath(cachedir, "j_cache.json")))
+cache_save(Jfun; force = true)          # ad30568: дамп раз в 64 оценки, форсим вручную
+check("cache JSON dumped", isfile(joinpath(cachedir, "j_cache_v2.json")))
 check("evals counted once", info2.evals == 1)
 
 # регуляризация: грубый θ (пила по эпохам) — больший J_reg

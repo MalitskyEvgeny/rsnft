@@ -168,7 +168,7 @@ function main_grid(argv = ARGS)
             default = 1.0e-3
         "--linear-tolerance"
             arg_type = Float64
-            default = 1.0e-8
+            default = 1.0e-6
         "--force"
             action = :store_true
         "--skip-images"

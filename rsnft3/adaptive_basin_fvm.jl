@@ -33,7 +33,7 @@ Base.@kwdef struct AdaptiveConfig
     max_dt_ma::Float64 = 2.5
     picard_iterations::Int = 8
     picard_tolerance_c::Float64 = 1.0e-3
-    linear_tolerance::Float64 = 1.0e-8
+    linear_tolerance::Float64 = 1.0e-6
     fluid_lambda::Float64 = 0.60
     fluid_density::Float64 = 1000.0
     fluid_heat_capacity::Float64 = 4180.0

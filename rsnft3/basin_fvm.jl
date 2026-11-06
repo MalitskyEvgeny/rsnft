@@ -44,7 +44,7 @@ Base.@kwdef struct SolverConfig
     fluid_density::Float64 = 1000.0
     fluid_heat_capacity::Float64 = 4180.0
     initial_lambda::Float64 = 2.5
-    pcg_tolerance::Float64 = 1.0e-8
+    pcg_tolerance::Float64 = 1.0e-6
 end
 
 function validate(c::SolverConfig)

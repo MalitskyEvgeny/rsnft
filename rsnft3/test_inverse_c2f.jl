@@ -56,7 +56,8 @@ check("invert_c2f: best J finite", isfinite(best.J) && best.J > 0)
 check("invert_c2f: nm polish happened (de_evals==0 in result)", best.de_evals == 0)
 
 # --- 4. кэши стадий раздельны ---
-check("separate caches: coarse cache dir exists", isfile(joinpath(cachedir, "coarse", "j_cache.json")))
+cache_save(obj_coarse; force = true)    # ad30568: дамп раз в 64 оценки, форсим вручную
+check("separate caches: coarse cache dir exists", isfile(joinpath(cachedir, "coarse", "j_cache_v2.json")))
 
 # --- 5. воркер-режим: воркеры получают invert.jl, c2f_stage_init! ставит Objective, DE идёт через worker_J ---
 if nprocs() > 1
