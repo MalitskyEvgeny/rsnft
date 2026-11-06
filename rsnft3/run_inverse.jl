@@ -72,6 +72,9 @@ function parse_epochs(spec::AbstractString)
     return out
 end
 
+"F7: NaN в логах -> n/a вместо NaN/nothing."
+fmt_or_na(x) = isnan(x) ? "n/a" : @sprintf("%.2f", x)
+
 "Явные ошибки на несовместимых комбинациях флагов вместо молчаливого поведения (3.2)."
 function validate_flags(args)
     bad(msg) = throw(ErrorException(msg))
@@ -364,9 +367,10 @@ function main()
         mesh_png = save_mesh_drawing(aresult.mesh, aresult.grid, aresult.final_temperature_cells,
                                      joinpath(out_dir, "mesh_adaptive.png"))
         println("MESH_PNG ", mesh_png)
-        println(@printf("ADAPTIVE J=%.2f (J_T=%.2f J_Ro=%.2f)  RMSE_T=%.2f RMSE_Ro=%.3f  T in 2s: %.1f%%",
-                        aJ, ainfo.J_T, ainfo.J_Ro, adaptive_rep.rmse_T, adaptive_rep.rmse_Ro,
-                        100 * adaptive_rep.frac_2s_T))
+        @printf("ADAPTIVE J=%.2f (J_T=%.2f J_Ro=%.2f)  RMSE_T=%s RMSE_Ro=%s  T in 2s: %s
+",
+                aJ, ainfo.J_T, ainfo.J_Ro, fmt_or_na(adaptive_rep.rmse_T),
+                fmt_or_na(adaptive_rep.rmse_Ro), fmt_or_na(100 * adaptive_rep.frac_2s_T))
     end
 
     (obj.n_artifact_T[] > 0 || obj.n_artifact_Ro[] > 0) && @warn "Артефактные выборки в лучшем прогоне" n_artifact_T = obj.n_artifact_T[] n_artifact_Ro = obj.n_artifact_Ro[]
@@ -447,8 +451,10 @@ function main()
 
     println("ENSEMBLE J: ", join([round(r.J; digits = 1) for r in results], ", "))
     println("BEST θ̂: ", join([round(v; digits = 2) for v in best.theta], ", "))
-    println(@printf("RMSE_T=%.2f RMSE_Ro=%.3f  T in 2σ: %.1f%%  Ro in 2σ: %.1f%%  E^L2=%.2f",
-                    rep.rmse_T, rep.rmse_Ro, 100 * rep.frac_2s_T, 100 * rep.frac_2s_Ro, rep.l2))
+    @printf("RMSE_T=%s RMSE_Ro=%s  T in 2σ: %s%%  Ro in 2σ: %s%%  E^L2=%s
+",
+            fmt_or_na(rep.rmse_T), fmt_or_na(rep.rmse_Ro), fmt_or_na(100 * rep.frac_2s_T),
+            fmt_or_na(100 * rep.frac_2s_Ro), fmt_or_na(rep.l2))
     println("SAVED ", out_dir)
 end
 
