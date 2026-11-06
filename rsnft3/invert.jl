@@ -124,9 +124,10 @@ end
 "DE-поиск по полному θ в боксы; f_eval(θ) -> J. Seed сеем сами: RandomSeed
 BBO 0.6.12 obsolete и молча игнорируется — без Random.seed! прогон
 невоспроизводим даже при том же seed."
-function de_search(f_eval, layout; de_budget::Int, seed::Int, trace::Bool = false)
+function de_search(f_eval, layout; de_budget::Int, seed::Int, trace::Bool = false,
+                   warm_start = nothing)
     Random.seed!(seed)
-    res = bboptimize(f_eval;
+    res = bboptimize(f_eval, warm_start;
                      SearchRange = collect(zip(layout.lower, layout.upper)),
                      NumDimensions = length(layout),
                      MaxFuncEvals = de_budget,
@@ -165,9 +166,10 @@ end
 "Одна инверсия: DE по всему θ → NM-полировка по уровням эпох. f_eval(θ) -> J."
 function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool = true,
                        seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
-                       max_f_calls::Int = 0)
+                       max_f_calls::Int = 0, warm_start = nothing)
     t0 = time()
-    θde, Jde, de_evals = de_search(f_eval, layout; de_budget = de_budget, seed = seed, trace = trace)
+    θde, Jde, de_evals = de_search(f_eval, layout; de_budget = de_budget, seed = seed,
+                                   trace = trace, warm_start = warm_start)
     θ = collect(Float64.(θde))
     nm_evals = polish_nm!(f_eval, layout, θ; multilevel = multilevel,
                           nm_iterations = nm_iterations, max_f_calls = max_f_calls)
@@ -186,11 +188,13 @@ end
 оценка и NM-полировка — на главном (кэш воркеров сливается в главный)."
 function invert_workers(obj::Objective; de_budget::Int = 4000, multilevel::Bool = true,
                         seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
-                        max_f_calls::Int = 0)
+                        max_f_calls::Int = 0, warm_start = nothing)
     nprocs() > 1 || return invert_local(obj; de_budget = de_budget, multilevel = multilevel,
-                                        seed = seed, nm_iterations = nm_iterations, trace = trace)
+                                        seed = seed, nm_iterations = nm_iterations,
+                                        trace = trace, warm_start = warm_start)
     t0 = time()
-    θde, Jde, de_evals = de_search(worker_J, obj.layout; de_budget = de_budget, seed = seed, trace = trace)
+    θde, Jde, de_evals = de_search(worker_J, obj.layout; de_budget = de_budget, seed = seed,
+                                   trace = trace, warm_start = warm_start)
     θ = collect(Float64.(θde))
     nm_evals = polish_nm!(θ -> obj(θ)[1], obj.layout, θ; multilevel = multilevel,
                           nm_iterations = nm_iterations, max_f_calls = max_f_calls)
@@ -216,7 +220,7 @@ end
 function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::Int = 4000,
                                   multilevel::Bool = true, seed0::Int = 1,
                                   nm_iterations::Int = 200, trace::Bool = false,
-                                  max_f_calls::Int = 0)
+                                  max_f_calls::Int = 0, warm_start = nothing)
     ws = collect(workers())
     isempty(ws) && error("нет воркеров")
     futures = Vector{Future}(undef, ensemble)
@@ -230,7 +234,8 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
             f = remotecall(invert_start_on_worker, w,
                            (de_budget = de_budget, multilevel = multilevel,
                             seed = seed0 + s - 1, nm_iterations = nm_iterations,
-                            trace = trace, max_f_calls = max_f_calls))
+                            trace = trace, max_f_calls = max_f_calls,
+                            warm_start = (s == 1 ? warm_start : nothing)))
             futures[s] = f
             push!(get!(busy, w, Future[]), f)
             next_start += 1
@@ -256,19 +261,20 @@ end
 pmap'ит по всем воркерам, последовательно."
 function invert_ensemble(obj::Objective; ensemble::Int = 4, de_budget::Int = 4000,
                          multilevel::Bool = true, seed0::Int = 1, nm_iterations::Int = 200,
-                         trace::Bool = false, max_f_calls::Int = 0)
+                         trace::Bool = false, max_f_calls::Int = 0, warm_start = nothing)
     if nprocs() > 1 && ensemble >= nworkers()
         return invert_ensemble_parallel(obj; ensemble = ensemble, de_budget = de_budget,
                                         multilevel = multilevel, seed0 = seed0,
                                         nm_iterations = nm_iterations, trace = trace,
-                                        max_f_calls = max_f_calls)
+                                        max_f_calls = max_f_calls, warm_start = warm_start)
     end
     mode = nprocs() > 1 ? invert_workers : invert_local
     results = InversionResult[]
     for s in 1:ensemble
         push!(results, mode(obj; de_budget = de_budget, multilevel = multilevel,
                             seed = seed0 + s - 1, nm_iterations = nm_iterations,
-                            trace = trace, max_f_calls = max_f_calls))
+                            trace = trace, max_f_calls = max_f_calls,
+                            warm_start = (s == 1 ? warm_start : nothing)))
     end
     return sort!(results; by = r -> r.J)
 end

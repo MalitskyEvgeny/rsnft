@@ -40,7 +40,8 @@ function parse_cli()
         "--node-xs"       ; default = ""; help = "comma X-nodes of q in meters, e.g. 0,7000,23400,40000 (overrides --n-nodes/--mid-x)"
         "--epochs"        ; default = "200-100,100-35,35-10,10-0"
         "--no-multilevel" ; action = :store_true
-        "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE; grid-hierarchy fallback)"
+        "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE unless --de-warm-start; grid-hierarchy fallback)"
+        "--de-warm-start" ; action = :store_true; help = "with --theta0-file: run DE warm-started from theta0 (injected into the start population) + NM polish; de-budget > 0 required"
         "--max-dt-ma"     ; arg_type = Float64; default = 2.5; help = "solver max time step, Ma"
         "--picard-iters"  ; arg_type = Int; default = 3
         "--picard-tol"    ; arg_type = Float64; default = 1.0e-3
@@ -266,11 +267,21 @@ function main()
     elseif !isempty(args["theta0-file"])
         src = JSON.parsefile(args["theta0-file"])
         theta0 = Float64.(src["best"]["theta"])
-        println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
-        best = polish_from(obj, theta0; nm_iterations = args["nm-iterations"],
-                           multilevel = !args["no-multilevel"],
-                           max_f_calls = args["max-f-calls"])
-        results = [best]
+        if args["de-warm-start"]
+            println("DE warm-start from $(args["theta0-file"]): J=$(src["best"]["J"]), budget $(args["de-budget"])")
+            length(theta0) == length(layout) || error("theta0 dimension mismatch: $(length(theta0)) vs layout $(length(layout))")
+            clamp!(theta0, layout.lower, layout.upper)
+            results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
+                                      multilevel = !args["no-multilevel"], seed0 = args["seed"],
+                                      nm_iterations = args["nm-iterations"],
+                                      max_f_calls = args["max-f-calls"], warm_start = theta0)
+        else
+            println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
+            results = [polish_from(obj, theta0; nm_iterations = args["nm-iterations"],
+                                   multilevel = !args["no-multilevel"],
+                                   max_f_calls = args["max-f-calls"])]
+        end
+        best = first(results)
     else
         results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
                                   multilevel = !args["no-multilevel"], seed0 = args["seed"],
