@@ -70,7 +70,10 @@ if ($Uniform) {
 }
 if ($Force) { $SolverArgs += "--force" }
 
+# PS5: stderr native-processa pri 2>&1 stanovitsya ErrorRecord - EAP=Stop ubivaet skript
+$ErrorActionPreference = "Continue"
 $SolverOut = & $JuliaExe "--project=$R3" "-t" "$Threads" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+$ErrorActionPreference = "Stop"
 $RunLine = ($AllOut | Select-String -Pattern "^(RUN|CACHE_HIT)" | Select-Object -Last 1)
 if (-not $RunLine) { throw "solver did not report a run id" }
 $RunId = (($RunLine.ToString() -replace '[^\w\s]', ' ') -split '\s+' |
