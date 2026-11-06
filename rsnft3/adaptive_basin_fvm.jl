@@ -774,6 +774,25 @@ function colour_map_rgb(values::AbstractVector{Float64}, low::Float64, high::Flo
     return out
 end
 
+const MESH_PNG_MODE = Ref{String}("changed")
+
+"6.2: mesh.png по режиму --mesh-png (always|changed|never, дефолт changed).
+changed: рисуем только если хэш геометрии сетки изменился с прошлого прогона."
+function mesh_png_maybe(mesh::AdaptiveMesh, grid::CellGrid, temperature_c::Vector{Float64},
+                        run_dir::AbstractString)
+    mode = MESH_PNG_MODE[]
+    mode == "never" && return nothing
+    mark = joinpath(run_dir, "mesh.hash")
+    geo_hash = bytes2hex(sha256(string(length(mesh.cells), mesh.bounds)))[1:16]
+    if mode == "changed" && isfile(mark) && strip(read(mark, String)) == geo_hash
+        println("MESH_PNG skipped (mesh unchanged, hash $geo_hash)")
+        return nothing
+    end
+    path = save_mesh_drawing(mesh, grid, temperature_c, joinpath(run_dir, "mesh.png"))
+    open(mark, "w") do f; print(f, geo_hash); end
+    return path
+end
+
 function save_mesh_drawing(mesh::AdaptiveMesh, grid::CellGrid, temperature_c::Vector{Float64},
                            path::AbstractString; run_id::AbstractString = "")
     x0m, x1m, z0m, z1m = mesh.bounds
@@ -920,6 +939,10 @@ function main_adaptive(argv = ARGS)
     d = AdaptiveConfig()
     s = ArgParseSettings(description = "Adaptive quadtree FVM basin solver")
     @add_arg_table! s begin
+        "--mesh-png"
+            arg_type = String
+            default = "changed"
+            help = "mesh.png mode: always | changed (skip if mesh hash matches) | never"
         "--data-dir"
             arg_type = String
             default = default_data_dir_or_error()
@@ -955,6 +978,7 @@ function main_adaptive(argv = ARGS)
             action = :store_true
     end
     args = parse_args(argv, s)
+    MESH_PNG_MODE[] = args["mesh-png"]
 
     config = AdaptiveConfig(
         base_nx = args["base-nx"], base_nz = args["base-nz"], max_level = args["max-level"],
@@ -999,9 +1023,9 @@ function main_adaptive(argv = ARGS)
     save_adaptive(result, run_dir, metadata)
     update_manifest(cache_dir, metadata)
     println("SAVED $(joinpath(run_dir, "result.npz"))")
-    mesh_path = save_mesh_drawing(mesh, result.grid, result.final_temperature_cells,
-                                  joinpath(run_dir, "mesh.png"))
-    println(@sprintf("MESH_PNG %s", mesh_path))
+    mesh_path = mesh_png_maybe(mesh, result.grid, result.final_temperature_cells,
+                               run_dir)
+    mesh_path !== nothing && println(@sprintf("MESH_PNG %s", mesh_path))
     println(@sprintf("CELLS %d ACTIVE %d MIN_CELL %.3fx%.3f m",
                      length(mesh.cells), final_active, metadata["minimum_dx_m"], metadata["minimum_dz_m"]))
     println(@sprintf("T_FINAL %.3f %.3f C", minimum(finite), maximum(finite)))
