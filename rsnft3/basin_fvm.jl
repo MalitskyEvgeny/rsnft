@@ -23,6 +23,9 @@ using Printf
 using Serialization
 using SHA
 using Statistics
+
+include(joinpath(@__DIR__, "progress.jl"))
+using .Progress
 using XLSX
 
 const SECONDS_PER_MA = 1.0e6 * 365.25 * 24.0 * 3600.0
@@ -97,38 +100,58 @@ harmonic(a, b) = 2.0 * a * b / max(a + b, 1.0e-30)
 function pcg_solve(diagonal::Vector{Float64}, pair_p::Vector{Int}, pair_q::Vector{Int},
                    conductance::Vector{Float64}, rhs::Vector{Float64}, initial::Vector{Float64};
                    tolerance::Float64 = 1.0e-9, max_iterations::Int = 1000)
-    buf = similar(diagonal)
-    function matvec(v::Vector{Float64})
-        result = buf
-        result .= diagonal .* v
-        @inbounds for k in eachindex(pair_p)
-            p = pair_p[k]; q = pair_q[k]; g = conductance[k]
-            result[p] -= g * v[q]
-            result[q] -= g * v[p]
-        end
-        return result
+    n = length(diagonal)
+    solution = Vector{Float64}(undef, n)
+    residual = Vector{Float64}(undef, n)
+    z = Vector{Float64}(undef, n)
+    direction = Vector{Float64}(undef, n)
+    applied = Vector{Float64}(undef, n)
+    copyto!(solution, initial)
+    @inbounds @simd for i in 1:n
+        residual[i] = diagonal[i] * solution[i]
     end
-
-    solution = copy(initial)
-    residual = rhs - matvec(solution)
+    @inbounds for k in eachindex(pair_p)
+        p = pair_p[k]; q = pair_q[k]; g = conductance[k]
+        residual[p] -= g * solution[q]
+        residual[q] -= g * solution[p]
+    end
+    @inbounds @simd for i in 1:n
+        residual[i] = rhs[i] - residual[i]
+    end
     scale = max(norm(rhs), 1.0)
     relative = norm(residual) / scale
     relative <= tolerance && return solution, 0, relative
-    z = residual ./ diagonal
-    direction = copy(z)
+    @inbounds @simd for i in 1:n
+        z[i] = residual[i] / diagonal[i]
+    end
+    copyto!(direction, z)
     rz_old = dot(residual, z)
     for iteration in 1:max_iterations
-        applied = matvec(direction)
+        @inbounds @simd for i in 1:n
+            applied[i] = diagonal[i] * direction[i]
+        end
+        @inbounds for k in eachindex(pair_p)
+            p = pair_p[k]; q = pair_q[k]; g = conductance[k]
+            applied[p] -= g * direction[q]
+            applied[q] -= g * direction[p]
+        end
         denominator = dot(direction, applied)
         denominator <= 0.0 && error("PCG lost positive definiteness")
         alpha = rz_old / denominator
-        solution .+= alpha .* direction
-        residual .-= alpha .* applied
+        @inbounds @simd for i in 1:n
+            solution[i] += alpha * direction[i]
+            residual[i] -= alpha * applied[i]
+        end
         relative = norm(residual) / scale
         relative <= tolerance && return solution, iteration, relative
-        z = residual ./ diagonal
+        @inbounds @simd for i in 1:n
+            z[i] = residual[i] / diagonal[i]
+        end
         rz_new = dot(residual, z)
-        direction = z .+ (rz_new / rz_old) .* direction
+        beta = rz_new / rz_old
+        @inbounds @simd for i in 1:n
+            direction[i] = z[i] + beta * direction[i]
+        end
         rz_old = rz_new
     end
     error(@sprintf("PCG did not converge in %d iterations (residual=%.3e)", max_iterations, relative))
@@ -679,6 +702,7 @@ function run_forward_param(data::BasinDataset, config::SolverConfig,
     saved_temperature = [copy(temperature)]
     diagnostics = OrderedDict{String,Any}[]
 
+    Progress.bar_start(length(geometry.steps), "Forward time steps")
     start = time_ns()
     previous_state = s0
     previous_grid = geometry.exact_grids[age0]
@@ -693,6 +717,7 @@ function run_forward_param(data::BasinDataset, config::SolverConfig,
             transported, state, z, dx, dz, step.dt_seconds, data.properties, config;
             grid = step.grid)
         push!(diagnostics, merge(OrderedDict{String,Any}("age_ma" => state.age), diag))
+        Progress.bar_add(1, @sprintf("Forward time steps · age %.1f Ma", state.age))
         previous_state = state
         previous_grid = step.grid
         # снимок на границе эпохи — как в classic (push внутри цикла по эпохам)
@@ -701,6 +726,7 @@ function run_forward_param(data::BasinDataset, config::SolverConfig,
             push!(saved_temperature, copy(temperature))
         end
     end
+    Progress.bar_finish()
 
     final_grid = geometry.exact_grids[data.ages[end]]
     elapsed = (time_ns() - start) / 1.0e9
@@ -744,6 +770,9 @@ function run_forward(data::BasinDataset, config::SolverConfig;
     saved_temperature = [copy(temperature)]
     diagnostics = OrderedDict{String,Any}[]
 
+    total_steps = sum(max(1, Int(ceil((data.ages[k] - data.ages[k+1]) / config.max_dt_ma)))
+                      for k in 1:length(data.ages)-1)
+    Progress.bar_start(total_steps, "Forward time steps")
     start = time_ns()
     for (age_old, age_young) in zip(data.ages[1:end-1], data.ages[2:end])
         span = age_old - age_young
@@ -757,10 +786,12 @@ function run_forward(data::BasinDataset, config::SolverConfig;
             temperature, diag = implicit_fvm_step(
                 transported, state, z, dx, dz, dt_seconds, data.properties, config)
             push!(diagnostics, merge(OrderedDict{String,Any}("age_ma" => state.age), diag))
+            Progress.bar_add(1, @sprintf("Forward time steps · age %.1f Ma", state.age))
             previous_state = state
         end
         push!(saved_temperature, copy(temperature))
     end
+    Progress.bar_finish()
 
 
     final_state = exact[data.ages[end]]
@@ -830,6 +861,7 @@ end
 # ----------------------------------------------------------------------------
 
 function main(argv = ARGS)
+    Progress.init()
     s = ArgParseSettings(description = "2-D basin finite-volume forward solver")
     @add_arg_table! s begin
         "--data-dir"

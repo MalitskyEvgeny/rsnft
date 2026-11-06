@@ -10,6 +10,9 @@
 isdefined(@__MODULE__, :BasinDataset) || include(joinpath(@__DIR__, "basin_fvm.jl"))
 include(joinpath(@__DIR__, "config_check.jl"))
 
+include(joinpath(@__DIR__, "progress.jl"))
+using .Progress
+
 const DEFAULT_DATA_DIR = joinpath(@__DIR__, "..", "Данные для обратной задачи")
 "Фатально, если дефолтный каталог данных не найден (F8: вместо личного пути)."
 function default_data_dir_or_error()
@@ -629,6 +632,9 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
     start = time_ns()
 
     si_mesh = 0
+    total_steps = sum(max(1, Int(ceil((ages[k] - ages[k+1]) / config.max_dt_ma)))
+                      for k in 1:length(ages)-1)
+    Progress.bar_start(total_steps, "Adaptive forward time steps")
     for (older_age, younger_age) in zip(ages[1:end-1], ages[2:end])
         span = older_age - younger_age
         steps = max(1, Int(ceil(span / config.max_dt_ma)))
@@ -682,6 +688,8 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
                 "cells" => length(new_mesh.cells),
                 "active_cells" => count(new_grid.active),
             ), diag))
+            Progress.bar_add(1, @sprintf("Adaptive forward · age %.1f Ma · %d cells",
+                                         new_state.age, length(new_mesh.cells)))
             mesh, state, grid = new_mesh, new_state, new_grid
             previous_fraction = geometry === nothing ? fraction : sg.fraction
         end
@@ -689,6 +697,7 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
         push!(saved, preview)
         push!(cell_counts, length(mesh.cells))
     end
+    Progress.bar_finish()
 
     elapsed = (time_ns() - start) / 1.0e9
     final_lith = mesh_to_regular(mesh, Float64.(grid.lith), config.preview_nx, config.preview_nz)[3]
@@ -927,6 +936,7 @@ end
 # ----------------------------------------------------------------------------
 
 function main_adaptive(argv = ARGS)
+    Progress.init()
     d = AdaptiveConfig()
     s = ArgParseSettings(description = "Adaptive quadtree FVM basin solver")
     @add_arg_table! s begin

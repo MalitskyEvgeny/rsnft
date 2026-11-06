@@ -103,7 +103,7 @@ $InvArgs = @(
 ) + @($AdaptiveFlag.Keys)
 if ($Theta0File) { $InvArgs += @("--theta0-file", (Resolve-Path $Theta0File).Path) }
 
-Write-Host "=== run_inverse ($Mode) ===" -ForegroundColor Cyan
+Write-Host "=== Stage 1/2: inversion ($Mode) ===" -ForegroundColor Cyan
 Write-Host ("out={0}  grid={1}  adaptive base={2} level={3} preview={4}" -f $OutDir, $Grid, $AdaptiveBase, $AdaptiveLevel, $AdaptivePreview)
 $T0 = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -115,7 +115,7 @@ $SolutionPath = Join-Path $OutDir "solution.json"
 if (-not (Test-Path $SolutionPath)) { throw "solution.json missing: $SolutionPath" }
 
 if (-not $NoReport) {
-    Write-Host "`n=== report ===" -ForegroundColor Cyan
+    Write-Host "`n=== Stage 2/2: report ===" -ForegroundColor Cyan
     & $JuliaExe "--project=$R3" (Join-Path $R3 "report_full.jl") --inverse $OutDir
     if ($LASTEXITCODE -ne 0) { Write-Warning "report_full.jl failed; continuing" }
 }

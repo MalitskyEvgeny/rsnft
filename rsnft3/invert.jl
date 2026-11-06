@@ -12,6 +12,9 @@ using Optim
 
 include(joinpath(@__DIR__, "objective.jl"))
 
+include(joinpath(@__DIR__, "progress.jl"))
+using .Progress
+
 struct InversionResult
     theta::Vector{Float64}
     J::Float64
@@ -140,12 +143,19 @@ BBO 0.6.12 obsolete и молча игнорируется — без Random.see
 function de_search(f_eval, layout; de_budget::Int, seed::Int, trace::Bool = false,
                    warm_start = nothing)
     Random.seed!(seed)
+    de_cb(ctrl) = Progress.bar_add(0, @sprintf("DE search · eval %d/%d · best J=%.1f",
+                                               BlackBoxOptim.num_func_evals(ctrl), de_budget,
+                                               best_fitness(ctrl)))
+    Progress.bar_start(de_budget, "DE search")
     res = bboptimize(f_eval, warm_start;
                      SearchRange = collect(zip(layout.lower, layout.upper)),
                      NumDimensions = length(layout),
                      MaxFuncEvals = de_budget,
                      TraceMode = trace ? :verbose : :silent,
+                     CallbackFunction = de_cb,
+                     CallbackInterval = 1.0,
                      ParallelEvaluation = (myid() == 1 && nprocs() > 1))
+    Progress.bar_finish()
     return best_candidate(res), best_fitness(res), BlackBoxOptim.f_calls(res)
 end
 
@@ -155,7 +165,10 @@ function polish_nm!(f_eval, layout::ThetaLayout, θ::Vector{Float64};
                     multilevel::Bool = true, nm_iterations::Int = 200, max_f_calls::Int = 0)
     nm_evals = 0
     levels = multilevel ? collect(1:length(layout.epochs)) : [length(layout.epochs)]
-    for level in levels
+    nm_t0 = time()
+    for (li, level) in enumerate(levels)
+        Progress.step_note(@sprintf("NM polish · level %d/%d · elapsed %s",
+                                    li, length(levels), Progress.fmt_time_public(time() - nm_t0)))
         idx = level_indices(layout, level)
         θstart = copy(θ)
         active = fill(false, length(θ)); active[idx] .= true
@@ -267,10 +280,12 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
             wait(first(first(busy)[2]))         # ждём ближайший готовый старт
             continue
         end
+        done_count = ensemble - next_start + 1 + length(done_ws)
         for w in done_ws
             push!(idle, w)
             delete!(busy, w)
         end
+        Progress.step_note(@sprintf("ensemble starts: %d/%d done", done_count, ensemble))
     end
     results = [fetch(f) for f in futures]
     merge_worker_caches!(obj)
@@ -293,6 +308,7 @@ function invert_ensemble(obj::Objective; ensemble::Int = 4, de_budget::Int = 400
     mode = nprocs() > 1 ? invert_workers : invert_local
     results = InversionResult[]
     for s in 1:ensemble
+        Progress.step_note(@sprintf("ensemble start %d/%d (seed %d)", s, ensemble, seed0 + s - 1))
         push!(results, mode(obj; de_budget = de_budget, multilevel = multilevel,
                             seed = seed0 + s - 1, nm_iterations = nm_iterations,
                             trace = trace, max_f_calls = max_f_calls,

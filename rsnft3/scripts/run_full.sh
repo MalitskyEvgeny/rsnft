@@ -134,12 +134,12 @@ OUT_DIR="$(to_julia_path "$OUT_DIR")"
 
 SOLVER="$R3/adaptive_basin_fvm.jl"
 if [[ $UNIFORM -eq 1 ]]; then
-    echo "=== forward (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
+    echo "=== Stage 1/3: forward solve (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --nx "$NX" --nz "$NZ")
     SOLVER="$R3/basin_fvm.jl"
 else
-    echo "=== forward (adaptive): $(basename "$DATA_DIR"), base $BASE, level $LEVEL ==="
+    echo "=== Stage 1/3: forward solve (adaptive): $(basename "$DATA_DIR"), base $BASE, level $LEVEL ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --base-nx "${BASE%,*}" --base-nz "${BASE#*,}"
                  --max-level "$LEVEL")
@@ -151,7 +151,7 @@ RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
 
-echo "=== inverse (wells: $WELLS) ==="
+echo "=== Stage 2/3: inversion (wells: $WELLS) ==="
 INVERSE_ARGS=(--data-dir "$INV_DATA_DIR" --wells "$WELLS" --grid "$GRID"
               --ensemble "$ENSEMBLE" --workers "$WORKERS"
               --de-budget "$DE_BUDGET" --nm-iterations "$NM_ITERATIONS"
@@ -176,7 +176,7 @@ fi
 
 "$JULIA" --project="$R3" -t "$THREADS" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"
 
-echo "=== report ==="
+echo "=== Stage 3/3: report ==="
 "$JULIA" --project="$R3" -t "$THREADS" "$R3/report_full.jl" \
     --direct "$RUN_DIR" --inverse "$OUT_DIR/inverse" --out "$OUT_DIR/report.html"
 

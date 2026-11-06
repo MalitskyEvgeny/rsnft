@@ -80,12 +80,13 @@ OUT_DIR="$(to_julia_path "$OUT_DIR")"
 
 SOLVER="$R3/adaptive_basin_fvm.jl"
 if [[ $UNIFORM -eq 1 ]]; then
-    echo "=== forward (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
+    SOLVER="$R3/basin_fvm.jl"
+    echo "=== Stage 1/2: forward solve (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --nx "$NX" --nz "$NZ" --max-dt-ma "$MAX_DT_MA"
                  --picard-iterations "$PICARD")
 else
-    echo "=== forward (adaptive): $(basename "$DATA_DIR"), base $ADAPTIVE_BASE, level $ADAPTIVE_LEVEL ==="
+    echo "=== Stage 1/2: forward solve (adaptive): $(basename "$DATA_DIR"), base $ADAPTIVE_BASE, level $ADAPTIVE_LEVEL ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --base-nx "${ADAPTIVE_BASE%,*}" --base-nz "${ADAPTIVE_BASE#*,}"
                  --max-level "$ADAPTIVE_LEVEL" --max-dt-ma "$MAX_DT_MA"
@@ -98,7 +99,7 @@ RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
 
-echo "=== report ==="
+echo "=== Stage 2/2: report ==="
 "$JULIA" --project="$R3" "$R3/report_full.jl" --direct "$RUN_DIR" --out "$OUT_DIR/report.html"
 
 echo "=== summary ==="
