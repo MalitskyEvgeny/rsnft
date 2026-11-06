@@ -125,7 +125,7 @@ julia --project=rsnft3 -t 8 rsnft3/run_inverse.jl ... --grid 20,40   --theta0-fi
 <tr><td>--epochs</td><td>200-100,100-35,35-10,10-0</td><td>эпохи q(t), Ma</td></tr>
 <tr><td>--theta0-file</td><td>&mdash;</td><td>solution.json: полировка с готового &theta;&#770;, перенос между сетками</td></tr>
 <tr><td>--max-dt-ma / --picard-iters / --pcg-tol</td><td>2.5 / 3 / 1e-8</td><td>жёсткость решателя (рычаги скорости, раздел 7)</td></tr>
-<tr><td>--max-f-calls</td><td>0</td><td>лимит оценок J на ступень NM (0 = без лимита)</td></tr>
+<tr><td>--max-f-calls</td><td>0</td><td>лимит оценок J на ступень NM (-1 = динамический лимит (2 × nm-iterations × уровней), 0 = без лимита)</td></tr>
 <tr><td>--no-multilevel</td><td>выкл</td><td>отключить многоуровневую NM-полировку по эпохам</td></tr>
 <tr><td>--adaptive-final</td><td>выкл</td><td>контроль критериев на адаптивной сетке при лучшем &theta;&#770;</td></tr>
 <tr><td>--adaptive-search</td><td>выкл</td><td>весь конвейер (поиск + критерии) на адаптивной сетке</td></tr>

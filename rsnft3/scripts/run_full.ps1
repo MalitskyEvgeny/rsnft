@@ -126,6 +126,7 @@ if (-not $Uniform) {
     $InverseArgs += @("--adaptive-final", "--adaptive-base", $AdaptiveBase,
                       "--adaptive-level", "$AdaptiveLevel")
 }
+if ($Twin) { $InverseArgs += @("--q-true", $Q) }
 if ($Theta0File) { $InverseArgs += @("--theta0-file", $Theta0File) }
 & $JuliaExe @InverseArgs
 if ($LASTEXITCODE -ne 0) { throw "run_inverse.jl failed" }

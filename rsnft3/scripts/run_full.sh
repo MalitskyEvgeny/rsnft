@@ -171,6 +171,7 @@ if [[ $TWIN -eq 1 ]]; then
         --out "$TWIN_FILE"
     INVERSE_ARGS=(--data-dir "$INV_DATA_DIR" --wells "$TWIN_FILE" "${INVERSE_ARGS[@]:2}")
 fi
+[[ $TWIN -eq 1 ]] && INVERSE_ARGS+=(--q-true "$TWIN_Q")
 [[ -n "$THETA0" ]] && INVERSE_ARGS+=(--theta0-file "$THETA0")
 
 "$JULIA" --project="$R3" -t "$THREADS" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"

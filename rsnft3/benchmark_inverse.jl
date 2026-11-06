@@ -29,9 +29,10 @@ end
 function bench_grid(data, wells, nx, nz, n)
     layout = make_q_layout(data; n_nodes = 3, mid_x = 23400.0)
     cfg = SolverConfig(nx = nx, nz = nz)
-    mkpath("results/_bench_cache")
+    bench_cache = abspath(joinpath(@__DIR__, "..", "results", "_bench_cache"))
+    mkpath(bench_cache)
     obj = make_objective(data, wells, cfg, layout; reg = 1.0, weight_ro = 1.0,
-                         cache_dir = "results/_bench_cache")
+                         cache_dir = bench_cache)
     d = length(layout)
     θ = collect(range(mean(layout.lower), mean(layout.upper); length = d))
 
@@ -71,7 +72,7 @@ function main()
         @printf("%-8d %-8d %-10d %-14.1f %-12.3f %-10.1f\n",
                 r.nx, r.nz, r.d, r.miss_ms, r.hit_ms, r.save_ms)
     end
-    println("cached J-файл: results/_bench_cache (можно удалить)")
+    println("cached J-файл: $bench_cache (можно удалить)")
 end
 
 try
