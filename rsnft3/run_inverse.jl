@@ -175,7 +175,7 @@ function mode_c2f(ctx)
     c2f_stage = nothing
     c2f_stages = C2fStage[]
     cde = 0
-    if true
+    begin
         # Stage A (coarse): DE на грубой regular-сетке; layout тот же.
         cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
         # 2.7: грубая стадия исторически в ~7 раз дольше полировки — дефолт 25%
@@ -251,7 +251,6 @@ function mode_c2f(ctx)
                                 picard_iterations = args["picard-iters"],
                                 pcg_tolerance = args["pcg-tol"],
                                 nodes_x = node_xs)
-                _WORKER_OBJ[] = cobj
             end
             _WORKER_OBJ[] = cobj
             best, c2f_stage = invert_c2f(cobj, obj; de_budget = cde,
