@@ -187,13 +187,24 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
         end
     end
     geometry = backend === :adaptive ? adaptive_geo : precompute_geometry(data, cfg)
+    # ctx_hash должен покрывать всё, что влияет на значение J (иначе кэш
+    # молча возвращает устаревшие J при смене sigma/допусков/таргетов):
+    targets_ctx = Any[
+        ["T", p.x, p.z, p.value, p.sigma] for p in t_targets] ∪
+        Any[["Ro", p.x, p.layer, p.eta, p.value, p.sigma] for p in ro_targets]
     ctx = OrderedDict(
         "version" => J_CACHE_VERSION, "input" => data.fingerprint,
         "nx" => cfg.nx, "nz" => cfg.nz,
+        "max_dt_ma" => cfg.max_dt_ma,
+        "picard_iterations" => cfg.picard_iterations,
+        "picard_tolerance_c" => cfg.picard_tolerance_c,
+        "pcg_tolerance" => cfg.pcg_tolerance,
         "epochs" => layout.epochs, "nodes_x" => layout.nodes_x,
         "lower" => layout.lower, "upper" => layout.upper,
         "reg" => reg, "weight_ro" => weight_ro,
         "backend" => String(backend),
+        "adaptive_cfg" => backend === :adaptive ? adaptive_cfg : nothing,
+        "targets" => sort(targets_ctx; by = x -> (x[1], x[2], x[3])),
         "n_T" => length(t_targets), "n_Ro" => length(ro_targets))
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
                      t_targets, ro_targets, n_dropped, Ref(0), Ref(0),
@@ -221,7 +232,7 @@ n_targets(obj::Objective, kind::Symbol) =
 "Вызов objective(θ) -> (J, info); сам Objective хранит кэш, счётчики и мишени."
 (obj::Objective)(θ::AbstractVector{<:Real}) = evaluate(obj, θ)
 
-const J_CACHE_VERSION = 2
+const J_CACHE_VERSION = 3
 
 "Ключ кэша: θ ⊕ контекст (данные, сетка, layout, reg, weight_ro, backend, версия) — F4."
 cache_key(θ::AbstractVector{<:Real}, ctx_hash::AbstractString = "") =
@@ -234,7 +245,7 @@ const CACHE_SAVE_EVERY = 64
 function cache_save(obj::Objective; force::Bool = false)
     isempty(obj.cache_path) && return
     # 2.2: пишем раз в CACHE_SAVE_EVERY свежих оценок (или force) — не на каждой
-    obj._dirty === nothing || (force = force || obj._dirty[] >= CACHE_SAVE_EVERY)
+    force = force || obj._dirty[] >= CACHE_SAVE_EVERY
     force || return
     mkpath(dirname(obj.cache_path))
     tmp = obj.cache_path * ".tmp"
@@ -242,7 +253,7 @@ function cache_save(obj::Objective; force::Bool = false)
         JSON.print(f, OrderedDict(k => json_safe(v) for (k, v) in obj.cache))
     end
     mv(tmp, obj.cache_path; force = true)      # атомарно на практике
-    obj._dirty === nothing || (obj._dirty[] = 0)
+    obj._dirty[] = 0
 end
 
 "Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info)."
