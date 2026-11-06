@@ -55,3 +55,8 @@ julia --project=. run_inverse.jl --data-dir "../Данные для обратн
   отмечает NaN-невязки финального результата (раньше они молча отбрасывались и
   прогон выглядел «почти успешным»).
 - RMSE_T = 12.60 (базлайн 12.57), T in 2σ = 29.7% — в допуске шума DE.
+
+## Smoke Phase 2 (cache/context + c2f default + warm-start DE)
+Коммиты ad30568..6cc2c80 (2.1-2.7 + фикс make_objective: потерянный arg `evals::RefValue{Int}` в вызове Objective, ломал worker_init! при workers>1 — баг внёсён в ad30568, найден по MethodError на воркере, зафиксирован 6cc2c80).
+- Прогон 1: J=24412.75 (J_T=19683.06, J_Ro=904.42, J_reg=3825.27), elapsed=199.9s, n_artifact_T/Ro(main)=0, per-well artifacts 1/2/0/0/0, passed=false (строгая приёмка). Совпадает с Phase 1 smoke — регрессии нет.
+- Прогон 2 (тот же seed/out, контекстный ключ j_cache_v2 совпал): J=24412.75, elapsed=86.9s → кэш-попадание даёт ускорение x2.3 на полном пайплайне.
