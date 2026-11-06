@@ -72,8 +72,31 @@ function parse_epochs(spec::AbstractString)
     return out
 end
 
+"Явные ошибки на несовместимых комбинациях флагов вместо молчаливого поведения (3.2)."
+function validate_flags(args)
+    bad(msg) = throw(ErrorException(msg))
+    args["weight-ro-cal"] != "1" && isempty(args["theta0-file"]) &&
+        bad("--weight-ro-cal требует --theta0-file (лестница калибровки применяется к лучшему θ)")
+    args["adaptive-search"] && args["c2f"] &&
+        bad("--adaptive-search несовместим с --c2f (coarse-to-fine работает только на регулярных сетках)")
+    any(args[k] for k in ("adaptive-final", "adaptive-search")) && !args["adaptive-search"] &&
+        args["adaptive-base"] != "16,32" && isempty(args["theta0-file"]) &&
+        @warn "--adaptive-base/--adaptive-level применяются только вместе с --adaptive-final или --adaptive-search"
+    args["de-warm-start"] && isempty(args["theta0-file"]) &&
+        bad("--de-warm-start требует --theta0-file (источник тёплого старта)")
+    args["de-warm-start"] && args["de-budget"] <= 0 &&
+        bad("--de-warm-start требует --de-budget > 0 (DE без бюджета не запускается)")
+    return nothing
+end
+
 function main()
     args = parse_cli()
+    try
+        validate_flags(args)
+    catch err
+        println(stderr, "ОШИБКА КОНФИГУРАЦИИ: ", sprint(showerror, err))
+        exit(1)
+    end
     nx, nz = parse.(Int, split(args["grid"], ","))
     out_dir = abspath(args["out"])
     validate_inputs(args["data-dir"], args["wells"], out_dir)
