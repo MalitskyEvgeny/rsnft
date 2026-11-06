@@ -28,6 +28,19 @@ end
 
 const _WORKER_OBJ = Ref{Any}(nothing)
 
+# 7.3: почему Ref, а не явная передача контекста.
+# Objective нельзя пересылать между процессами: он держит BasinDataset
+# (десятки МБ XLSX-данных), Ref'ы (n_artifact/_dirty/evals), Dict-кэш с
+# bytes2hex-ключами и geometry-структуры; Distributed сериализует замыкания
+# по значению, поэтому каждый воркер строит СВОЙ Objective через
+# remotecall_fetch(worker_init!/worker_init_c2f!, ...) (см. run_inverse.jl),
+# а _WORKER_OBJ[] — локальная ссылка на этот экземпляр. Функции типа
+# worker_J(θ) и () -> _WORKER_OBJ[].cache читают Ref на СВОЕМ процессе.
+# Явная передача контекста (Objective как аргумент remotecall) сделала бы
+# сериализацию данных на каждый вызов — в разы медленнее и с риском
+# рассинхронизации кэшей; протокол «инициализация через remotecall_fetch +
+# локальный Ref» остаётся осознанным решением.
+
 "Инициализация на воркере: свой Objective (свой датасет и кэш). Вызывать
 remotecall_fetch(worker_setup, w, ...) после addprocs."
 function worker_setup(data, wells, cfg, layout; reg = 1.0, weight_ro = 1.0, cache_dir = "")
