@@ -6,6 +6,7 @@
 # N стартов с разными seed.
 
 using Distributed
+using Random
 using BlackBoxOptim
 using Optim
 
@@ -47,6 +48,56 @@ function merge_worker_caches!(obj::Objective)
     return obj
 end
 
+# --- воркеры c2f (ансамбль в c2f-режиме): воркер держит два Objective ---------
+
+const _WORKER_OBJ_COARSE = Ref{Any}(nothing)
+
+worker_J_coarse(θ::AbstractVector{<:Real}) = _WORKER_OBJ_COARSE[](θ)[1]
+
+"Инициализация воркера для c2f-ансамбля: два Objective (coarse + fine) с
+раздельными кэшами, за один remotecall. Параметры: именованные coarse_* и
+fine_* (SolverConfig-поля, reg, weight_ro, cache_dir, nodes_x)."
+function worker_init_c2f!(data_dir::AbstractString, wells::WellSet,
+                          epochs::Vector{Tuple{Float64,Float64}}, n_nodes::Int,
+                          mid_x::Float64;
+                          coarse_nx::Int, coarse_nz::Int, coarse_cache_dir::AbstractString,
+                          fine_nx::Int, fine_nz::Int, fine_cache_dir::AbstractString,
+                          nodes_x::Union{Nothing,Vector{Float64}} = nothing,
+                          reg::Real = 1.0, weight_ro::Real = 1.0,
+                          max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
+                          picard_tolerance_c::Real = 1.0e-3,
+                          pcg_tolerance::Real = 1.0e-8)
+    data = load_dataset_derived(data_dir, Workbook())
+    layout = make_q_layout(data; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x,
+                           nodes_x = nodes_x)
+    common = (max_dt_ma = Float64(max_dt_ma), picard_iterations = picard_iterations,
+              picard_tolerance_c = Float64(picard_tolerance_c),
+              pcg_tolerance = Float64(pcg_tolerance))
+    ccfg = SolverConfig(nx = coarse_nx, nz = coarse_nz; common...)
+    fcfg = SolverConfig(nx = fine_nx, nz = fine_nz; common...)
+    _WORKER_OBJ_COARSE[] = make_objective(data, wells, ccfg, layout;
+                                          reg = reg, weight_ro = weight_ro,
+                                          cache_dir = coarse_cache_dir)
+    _WORKER_OBJ[] = make_objective(data, wells, fcfg, layout;
+                                   reg = reg, weight_ro = weight_ro,
+                                   cache_dir = fine_cache_dir)
+    return myid()
+end
+
+"Слияние кэшей воркеров c2f-ансамбля: coarse-кэш в obj_coarse, fine-кэш в
+obj_fine; оба главных кэша сохраняются."
+function merge_worker_caches_c2f!(obj_coarse::Objective, obj_fine::Objective)
+    for w in workers()
+        wc = remotecall_fetch(() -> _WORKER_OBJ_COARSE[].cache, w)
+        merge!(obj_coarse.cache, wc)
+        wf = remotecall_fetch(() -> _WORKER_OBJ[].cache, w)
+        merge!(obj_fine.cache, wf)
+    end
+    cache_save(obj_coarse)
+    cache_save(obj_fine)
+    return nothing
+end
+
 # --- многоуровневость ---------------------------------------------------------
 
 "Индексы активных параметров уровня: k=1 — только молодая эпоха."
@@ -61,15 +112,17 @@ function level_indices(layout::ThetaLayout, level::Int)
     return idx
 end
 
-"DE-поиск по полному θ в боксы; f_eval(θ) -> J."
+"DE-поиск по полному θ в боксы; f_eval(θ) -> J. Seed сеем сами: RandomSeed
+BBO 0.6.12 obsolete и молча игнорируется — без Random.seed! прогон
+невоспроизводим даже при том же seed."
 function de_search(f_eval, layout; de_budget::Int, seed::Int, trace::Bool = false)
+    Random.seed!(seed)
     res = bboptimize(f_eval;
                      SearchRange = collect(zip(layout.lower, layout.upper)),
                      NumDimensions = length(layout),
                      MaxFuncEvals = de_budget,
                      TraceMode = trace ? :verbose : :silent,
-                     ParallelEvaluation = nprocs() > 1,
-                     RandomSeed = seed)
+                     ParallelEvaluation = (myid() == 1 && nprocs() > 1))
     return best_candidate(res), best_fitness(res), BlackBoxOptim.f_calls(res)
 end
 
@@ -147,10 +200,69 @@ function invert_workers(obj::Objective; de_budget::Int = 4000, multilevel::Bool 
                            de_evals, nm_evals, time() - t0, seed)
 end
 
-"Ансамбль стартов; сортировка по J. Старты — последовательно, DE внутри — по воркерам."
+"Старт ансамбля целиком на воркере: DE серийно + NM серийно на локальном
+Objective. Вызывается remotecall'ом из invert_ensemble_parallel; параметры —
+именованный кортеж (позиционный аргумент: без kwargs-замыкания через
+Distributed нет world-age конфликта с @everywhere-include)."
+function invert_start_on_worker(kw::NamedTuple)
+    _WORKER_OBJ[] === nothing && error("воркер не инициализирован (worker_init!)")
+    return invert_local(_WORKER_OBJ[]; kw...)
+end
+
+"Ансамбль стартов параллельно: один старт целиком (DE серийно + NM серийно) на
+одном воркере, старты отправляются динамически по свободным воркерам — DE
+старта s+1 перекрывается с NM старта s. Детерминизм: seed = seed0+s-1, сбор в
+порядке стартов, сортировка по J; слияние кэшей воркеров в главный."
+function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::Int = 4000,
+                                  multilevel::Bool = true, seed0::Int = 1,
+                                  nm_iterations::Int = 200, trace::Bool = false,
+                                  max_f_calls::Int = 0)
+    ws = collect(workers())
+    isempty(ws) && error("нет воркеров")
+    futures = Vector{Future}(undef, ensemble)
+    idle = ws[:]
+    busy = Dict{Int,Vector{Future}}()          # воркер -> отправленные туда старты
+    next_start = 1
+    while next_start <= ensemble || !isempty(busy)
+        while next_start <= ensemble && !isempty(idle)
+            w = popfirst!(idle)
+            s = next_start
+            f = remotecall(invert_start_on_worker, w,
+                           (de_budget = de_budget, multilevel = multilevel,
+                            seed = seed0 + s - 1, nm_iterations = nm_iterations,
+                            trace = trace, max_f_calls = max_f_calls))
+            futures[s] = f
+            push!(get!(busy, w, Future[]), f)
+            next_start += 1
+        end
+        done_ws = Int[w for w in keys(busy) if all(isready, busy[w])]
+        if isempty(done_ws)
+            wait(first(first(busy)[2]))         # ждём ближайший готовый старт
+            continue
+        end
+        for w in done_ws
+            push!(idle, w)
+            delete!(busy, w)
+        end
+    end
+    results = [fetch(f) for f in futures]
+    merge_worker_caches!(obj)
+    return sort!(results; by = r -> r.J)
+end
+
+"Ансамбль стартов; сортировка по J. Диспетч по заполнению ядер: стартов
+больше или равно воркерам — старт целиком на воркере, параллельно (все ядра
+заняты волнами, NM перекрыт); стартов меньше — legacy: DE каждого старта
+pmap'ит по всем воркерам, последовательно."
 function invert_ensemble(obj::Objective; ensemble::Int = 4, de_budget::Int = 4000,
                          multilevel::Bool = true, seed0::Int = 1, nm_iterations::Int = 200,
                          trace::Bool = false, max_f_calls::Int = 0)
+    if nprocs() > 1 && ensemble >= nworkers()
+        return invert_ensemble_parallel(obj; ensemble = ensemble, de_budget = de_budget,
+                                        multilevel = multilevel, seed0 = seed0,
+                                        nm_iterations = nm_iterations, trace = trace,
+                                        max_f_calls = max_f_calls)
+    end
     mode = nprocs() > 1 ? invert_workers : invert_local
     results = InversionResult[]
     for s in 1:ensemble
@@ -272,6 +384,76 @@ function invert_c2f(obj_coarse::Objective, obj_fine::Objective;
     polished = polish_from(obj_fine, stage.theta; nm_iterations = nm_iterations,
                            multilevel = multilevel, max_f_calls = max_f_calls)
     return polished, stage
+end
+
+"Старт c2f-ансамбля целиком на воркере: серийный DE на coarse-Objective (через
+worker_J_coarse) -> NM-полировка на fine-Objective. Вызывается remotecall'ом;
+параметры — именованный кортеж (позиционный аргумент, без kwargs-замыкания)."
+function invert_start_c2f_on_worker(kw::NamedTuple)
+    de_budget::Int = kw.de_budget
+    nm_iterations::Int = kw.nm_iterations
+    multilevel::Bool = kw.multilevel
+    seed::Int = kw.seed
+    trace::Bool = kw.trace
+    max_f_calls::Int = kw.max_f_calls
+    (_WORKER_OBJ_COARSE[] === nothing || _WORKER_OBJ[] === nothing) &&
+        error("воркер не инициализирован для c2f (worker_init_c2f!)")
+    t0 = time()
+    θde, Jde, de_evals = de_search(worker_J_coarse, _WORKER_OBJ_COARSE[].layout;
+                                   de_budget = de_budget, seed = seed, trace = trace)
+    stage = C2fStage(collect(Float64.(θde)), Float64(Jde), de_evals, 0.0, seed)
+    polished = polish_from(_WORKER_OBJ[], stage.theta; nm_iterations = nm_iterations,
+                           multilevel = multilevel, max_f_calls = max_f_calls)
+    result = InversionResult(polished.theta, polished.J, polished.J_T, polished.J_Ro,
+                             polished.J_reg, polished.de_evals, polished.nm_evals,
+                             polished.elapsed_s, seed)
+    return result, stage
+end
+
+"Ансамбль c2f-стартов параллельно: воркер держит два Objective (coarse + fine) и
+выполняет старт целиком, без переинициализаций между стадиями и стартами.
+Детерминизм: seed = seed0+s-1; сбор в порядке стартов, сортировка по J; слияние
+кэшей воркеров (coarse и fine) в главные Objective."
+function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
+                             ensemble::Int = 4, de_budget::Int = 4000,
+                             nm_iterations::Int = 200, multilevel::Bool = true,
+                             seed0::Int = 1, trace::Bool = false, max_f_calls::Int = 0)
+    length(obj_coarse.layout) == length(obj_fine.layout) ||
+        error("c2f: coarse and fine layouts must match")
+    ws = collect(workers())
+    isempty(ws) && error("нет воркеров")
+    futures = Vector{Future}(undef, ensemble)
+    idle = ws[:]
+    busy = Dict{Int,Vector{Future}}()
+    next_start = 1
+    while next_start <= ensemble || !isempty(busy)
+        while next_start <= ensemble && !isempty(idle)
+            w = popfirst!(idle)
+            s = next_start
+            f = remotecall(invert_start_c2f_on_worker, w,
+                           (de_budget = de_budget, nm_iterations = nm_iterations,
+                            multilevel = multilevel, seed = seed0 + s - 1,
+                            trace = trace, max_f_calls = max_f_calls))
+            futures[s] = f
+            push!(get!(busy, w, Future[]), f)
+            next_start += 1
+        end
+        done_ws = Int[w for w in keys(busy) if all(isready, busy[w])]
+        if isempty(done_ws)
+            wait(first(first(busy)[2]))
+            continue
+        end
+        for w in done_ws
+            push!(idle, w)
+            delete!(busy, w)
+        end
+    end
+    pairs = [fetch(f) for f in futures]
+    results = InversionResult[p[1] for p in pairs]
+    stages = C2fStage[p[2] for p in pairs]
+    merge_worker_caches_c2f!(obj_coarse, obj_fine)
+    order = sortperm(results; by = r -> r.J)
+    return results[order], stages[order]
 end
 
 "Переинициализация воркеров под стадию c2f: для каждого воркера —
