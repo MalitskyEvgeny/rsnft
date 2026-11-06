@@ -115,7 +115,7 @@ if ($Twin) {
     if ($LASTEXITCODE -ne 0) { throw "make_twin.jl failed" }
     $WellsForInverse = $TwinFile
 }
-$InverseArgs = @("--project=$R3", (Join-Path $R3 "run_inverse.jl"),
+$InverseArgs = @("--project=$R3", "-t", "$Threads", (Join-Path $R3 "run_inverse.jl"),
                  "--data-dir", $InvDataDir, "--wells", $WellsForInverse,
                  "--grid", $Grid, "--ensemble", "$Ensemble", "--workers", "$Workers",
                  "--de-budget", "$DeBudget", "--nm-iterations", "$NmIterations",

@@ -18,6 +18,7 @@
 #   --nx N --nz N        сетка равномерного солвера (60 120; только с --uniform)
 #   --max-dt-ma F        максимальный шаг по времени, Ма (2.5)
 #   --picard-iters N     итерации Пикара (3)
+#   --threads N          Julia-потоки (8)
 #   --out FILE           куда писать отчёт (results/report_forward_<timestamp>/report.html)
 #   --force              пересчитать, даже если результат в кэше
 #   --open               открыть отчёт в браузере
@@ -27,6 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R3="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$R3/.." && pwd)"
 JULIA=${JULIA:-julia}
+THREADS=8
 
 DATA_DIR=""
 ADAPTIVE_BASE="16,32"
