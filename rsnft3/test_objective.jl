@@ -24,8 +24,13 @@ v = bilinear_sample(xg, zg, field, 25.0, 250.0)
 check("bilinear: linear field reproduced exactly", abs(v - (2 * 25 + 0.1 * 250)) < 1e-9)
 v2 = bilinear_sample(xg, zg, field, 27.5, 275.0)
 check("bilinear: interpolation between nodes", abs(v2 - (2 * 27.5 + 0.1 * 275)) < 1e-9)
+# Масочная интерполяция (c5fc0a4): NaN-углы исключаются с перенормировкой весов.
 field_nan = copy(field); field_nan[6, 3] = NaN   # ячейка стенсила (25, 250)
-check("bilinear: NaN stencil -> NaN", isnan(bilinear_sample(xg, zg, field_nan, 25.0, 250.0)))
+check("bilinear: one NaN corner -> finite (renormalized)",
+      isfinite(bilinear_sample(xg, zg, field_nan, 25.0, 250.0)))
+field_nan[5:7, 2:4] .= NaN                       # весь стенсил (25, 250) неактивен
+check("bilinear: all-NaN stencil -> NaN",
+      isnan(bilinear_sample(xg, zg, field_nan, 25.0, 250.0)))
 
 # --- 2. make_objective на реальных данных (сетка 50x60) ---
 const DATA = normpath(joinpath(@__DIR__, "..", "Данные для обратной задачи"))
