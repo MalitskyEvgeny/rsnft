@@ -364,11 +364,14 @@ function main()
             "frac_1s_T" => rep.frac_1s_T, "frac_2s_T" => rep.frac_2s_T,
             "frac_1s_Ro" => rep.frac_1s_Ro, "frac_2s_Ro" => rep.frac_2s_Ro,
             "l2" => rep.l2,
+            "n_artifact" => rep.n_artifact, "n_kept" => rep.n_kept,
+            "n_dropped" => rep.n_dropped, "passed" => rep.passed,
             "per_well" => [OrderedDict(
                 "well" => w.well, "n_T" => w.n_T, "n_Ro" => w.n_Ro,
                 "rmse_T" => w.rmse_T, "rmse_Ro" => w.rmse_Ro,
                 "frac_1s_T" => w.frac_1s_T, "frac_2s_T" => w.frac_2s_T,
-                "frac_1s_Ro" => w.frac_1s_Ro, "frac_2s_Ro" => w.frac_2s_Ro)
+                "frac_1s_Ro" => w.frac_1s_Ro, "frac_2s_Ro" => w.frac_2s_Ro,
+                "n_artifact" => w.n_artifact, "n_kept" => w.n_kept)
                 for w in rep.wells]),
         "elapsed_total_s" => time() - t_start,
     )
