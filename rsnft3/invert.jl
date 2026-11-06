@@ -169,7 +169,8 @@ end
 "Общая NM-полировка по уровням эпох (дедуп invert_single/invert_workers/polish_from):
 модифицирует θ на месте, возвращает число NM-оценок. f_eval(θfull) -> J."
 function polish_nm!(f_eval, layout::ThetaLayout, θ::Vector{Float64};
-                    multilevel::Bool = true, nm_iterations::Int = 200, max_f_calls::Int = 0)
+                    multilevel::Bool = true, nm_iterations::Int = 200, max_f_calls::Int = 0,
+                    progress_chan = nothing, fe_offset::Int = 0)
     nm_evals = 0
     levels = multilevel ? collect(1:length(layout.epochs)) : [length(layout.epochs)]
     nm_t0 = time()
@@ -184,6 +185,18 @@ function polish_nm!(f_eval, layout::ThetaLayout, θ::Vector{Float64};
             θfull = copy(θstart)
             θfull[idx] .= θsub
             f_eval(θfull)
+        end
+        fe = Ref(0)
+        fsub_raw = (θsub) -> begin
+            θfull = copy(θstart)
+            θfull[idx] .= θsub
+            f_eval(θfull)
+        end
+        fsub = (θsub) -> begin
+            J = fsub_raw(θsub)
+            fe[] += 1
+            progress_chan === nothing || put!(progress_chan, (myid(), fe_offset + fe[], J))
+            J
         end
         res = Optim.optimize(fsub, layout.lower[idx], layout.upper[idx], θstart[idx],
                              Fminbox(NelderMead()),
@@ -206,7 +219,8 @@ function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool =
                                    progress_chan = progress_chan)
     θ = collect(Float64.(θde))
     nm_evals = polish_nm!(f_eval, layout, θ; multilevel = multilevel,
-                          nm_iterations = nm_iterations, max_f_calls = max_f_calls)
+                          nm_iterations = nm_iterations, max_f_calls = max_f_calls,
+                          progress_chan = progress_chan, fe_offset = de_evals)
     return θ, de_evals, nm_evals, time() - t0
 end
 
@@ -273,15 +287,17 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
     # живой DE-прогресс с воркеров: колбэк de_search кладёт (pid, f_calls, J),
     # читатель на главном двигает полосу; сумма по всем стартам = ensemble·budget
     chan = RemoteChannel(() -> Channel{Tuple{Int,Int,Float64}}(64))
-    Progress.bar_start(ensemble * de_budget, "DE search (ensemble)")
+    nm_soft = ensemble * (max_f_calls > 0 ? max_f_calls : 2 * nm_iterations * 4)
+    Progress.bar_start(ensemble * de_budget + nm_soft, "DE + NM polish (ensemble)")
     last_fe = Dict{Int,Int}()
     reader = @async begin
         while true
             msg = try take!(chan) catch; break end
             delta = msg[2] - get(last_fe, msg[1], 0)
             last_fe[msg[1]] = msg[2]
-            Progress.bar_add(delta, @sprintf("DE search · worker %d · eval %d/%d · best J=%.1f",
-                                             msg[1], msg[2], de_budget, msg[3]))
+            phase = msg[2] <= de_budget ? "DE search" : "NM polish"
+            Progress.bar_add(delta, @sprintf("%s · worker %d · eval %d/%d · best J=%.1f",
+                                             phase, msg[1], msg[2], de_budget, msg[3]))
         end
         Progress.bar_finish()
     end
@@ -378,12 +394,13 @@ end
 "Полировка без DE: NM по уровням эпох из заданного старта (иерархия сеток:
 DE на грубой, полировка на рабочей)."
 function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 200,
-                     multilevel::Bool = true, max_f_calls::Int = 0)
+                     multilevel::Bool = true, max_f_calls::Int = 0, progress_chan = nothing)
     t0 = time()
     θ = collect(Float64.(θ0))
     length(θ) == length(obj.layout) || error("theta0 length mismatch")
     nm_evals = polish_nm!(θ -> obj(θ)[1], obj.layout, θ; multilevel = multilevel,
-                          nm_iterations = nm_iterations, max_f_calls = max_f_calls)
+                          nm_iterations = nm_iterations, max_f_calls = max_f_calls,
+                          progress_chan = progress_chan)
     J, info = obj(θ)
     return InversionResult(θ, J, info.J_T, info.J_Ro, info.J_reg,
                            0, nm_evals, time() - t0, 0)
@@ -456,7 +473,8 @@ function invert_start_c2f_on_worker(kw::NamedTuple)
                                    progress_chan = get(kw, :progress_chan, nothing))
     stage = C2fStage(collect(Float64.(θde)), Float64(Jde), de_evals, 0.0, seed)
     polished = polish_from(_WORKER_OBJ[], stage.theta; nm_iterations = nm_iterations,
-                           multilevel = multilevel, max_f_calls = max_f_calls)
+                           multilevel = multilevel, max_f_calls = max_f_calls,
+                           progress_chan = get(kw, :progress_chan, nothing))
     result = InversionResult(polished.theta, polished.J, polished.J_T, polished.J_Ro,
                              polished.J_reg, polished.de_evals, polished.nm_evals,
                              polished.elapsed_s, seed)
@@ -481,15 +499,17 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
     next_start = 1
     # # живой прогресс стадии A (coarse DE) с воркеров
     chan = RemoteChannel(() -> Channel{Tuple{Int,Int,Float64}}(64))
-    Progress.bar_start(ensemble * de_budget, "DE search (c2f coarse ensemble)")
+    nm_soft = ensemble * (max_f_calls > 0 ? max_f_calls : 2 * nm_iterations * 4)
+    Progress.bar_start(ensemble * de_budget + nm_soft, "DE + NM polish (c2f coarse ensemble)")
     last_fe = Dict{Int,Int}()
     reader = @async begin
         while true
             msg = try take!(chan) catch; break end
             delta = msg[2] - get(last_fe, msg[1], 0)
             last_fe[msg[1]] = msg[2]
-            Progress.bar_add(delta, @sprintf("DE search (coarse) · worker %d · eval %d/%d · best J=%.1f",
-                                             msg[1], msg[2], de_budget, msg[3]))
+            phase = msg[2] <= de_budget ? "DE search (coarse)" : "NM polish (coarse)"
+            Progress.bar_add(delta, @sprintf("%s · worker %d · eval %d/%d · best J=%.1f",
+                                             phase, msg[1], msg[2], de_budget, msg[3]))
         end
         Progress.bar_finish()
     end
