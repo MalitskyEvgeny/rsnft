@@ -51,6 +51,9 @@ function parse_cli()
         "--adaptive-base" ; default = "16,32"; help = "adaptive base grid nx,nz (with --adaptive-final)"
         "--adaptive-level"; arg_type = Int; default = 2; help = "adaptive max refinement level (with --adaptive-final)"
         "--adaptive-preview"; default = "120,160"; help = "adaptive preview grid nx,nz for observation sampling"
+        "--c2f"           ; action = :store_true; help = "coarse-to-fine: DE on a coarse grid, NM polish on the working grid"
+        "--c2f-grid"      ; default = "20,40"; help = "coarse nx,nz (with --c2f)"
+        "--c2f-de-budget" ; arg_type = Int; default = 0; help = "DE budget on the coarse grid (0 = same as --de-budget)"
         "--adaptive-frozen"; action = :store_true; help = "build the adaptive mesh once on the final stratigraphy (no per-substep rebuild/remap)"
         "--out"           ; required = true
     end
@@ -126,7 +129,65 @@ function main()
                          adaptive_cfg = acfg)
     _WORKER_OBJ[] = obj      # BlackBoxOptim вызывает fitness и на главном
 
-    if !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
+    c2f_stage = nothing
+    if args["c2f"]
+        # Stage A (coarse): DE на грубой regular-сетке; layout тот же.
+        cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
+        cde = args["c2f-de-budget"] > 0 ? args["c2f-de-budget"] : args["de-budget"]
+        ccfg = SolverConfig(nx = cnx, nz = cnz, max_dt_ma = args["max-dt-ma"],
+                            picard_iterations = args["picard-iters"],
+                            picard_tolerance_c = args["picard-tol"],
+                            pcg_tolerance = args["pcg-tol"])
+        cobj = make_objective(data, wells, ccfg, layout; reg = args["reg"],
+                              weight_ro = args["weight-ro"],
+                              cache_dir = joinpath(cache_dir, "c2f_coarse"))
+        println("C2F: coarse grid $(cnx)x$(cnz), DE budget $cde; fine $(nx)x$(nz)")
+        # воркеры и главный — под грубую сетку (кэш воркеров — свой cache_dir)
+        if nprocs() > 1
+            data_dir_abs = abspath(args["data-dir"])
+            epochs = parse_epochs(args["epochs"])
+            c2f_stage_init!(worker_init!, data_dir_abs, wells, epochs,
+                            args["n-nodes"], args["mid-x"], cnx, cnz;
+                            reg = args["reg"], weight_ro = args["weight-ro"],
+                            cache_dir = joinpath(out_dir, "cache_w_coarse"),
+                            max_dt_ma = args["max-dt-ma"],
+                            picard_iterations = args["picard-iters"],
+                            pcg_tolerance = args["pcg-tol"],
+                            nodes_x = node_xs)
+            _WORKER_OBJ[] = cobj
+        end
+        _WORKER_OBJ[] = cobj
+        best, c2f_stage = invert_c2f(cobj, obj; de_budget = cde,
+                                     nm_iterations = args["nm-iterations"],
+                                     multilevel = !args["no-multilevel"],
+                                     seed = args["seed"], max_f_calls = args["max-f-calls"])
+        results = [best]
+        # drift-check: J на грубой и рабочей сетке при одном θ_coarse. Уровни J
+        # напрямую несравнимы (смещение дискретизации) — индикатор расхождения.
+        if c2f_stage !== nothing
+            Jc, _ = cobj(c2f_stage.theta)
+            println(@sprintf("C2F drift-check: J_coarse(theta_coarse)=%.1f (stage-A J=%.1f); J_fine(theta_coarse)=%.1f -> polished J=%.1f",
+                             Jc, c2f_stage.J, obj(c2f_stage.theta)[1], best.J))
+        end
+        # воркеры обратно под рабочую сетку (финальные прогоны и adaptive-final
+        # считают J на главном, но держим консистентность)
+        if nprocs() > 1
+            data_dir_abs = abspath(args["data-dir"])
+            epochs = parse_epochs(args["epochs"])
+            for w in workers()
+                remotecall_fetch(worker_init!, w, data_dir_abs, wells, epochs,
+                                 args["n-nodes"], args["mid-x"], nx, nz;
+                                 reg = args["reg"], weight_ro = args["weight-ro"],
+                                 cache_dir = joinpath(out_dir, "cache_w$w"),
+                                 max_dt_ma = args["max-dt-ma"],
+                                 picard_iterations = args["picard-iters"],
+                                 picard_tolerance_c = args["picard-tol"],
+                                 pcg_tolerance = args["pcg-tol"],
+                                 nodes_x = node_xs)
+            end
+            _WORKER_OBJ[] = obj
+        end
+    elseif !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
         src = JSON.parsefile(args["theta0-file"])
         theta0 = Float64.(src["best"]["theta"])
         ladder = parse.(Float64, split(args["weight-ro-cal"], ","))
@@ -245,6 +306,17 @@ function main()
                 for w in rep.wells]),
         "elapsed_total_s" => time() - t_start,
     )
+    if c2f_stage !== nothing
+        cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
+        solution["c2f"] = OrderedDict(
+            "coarse_grid" => OrderedDict("nx" => cnx, "nz" => cnz),
+            "coarse_de_budget" => args["c2f-de-budget"] > 0 ? args["c2f-de-budget"] : args["de-budget"],
+            "stage_A" => OrderedDict("theta" => c2f_stage.theta, "J" => c2f_stage.J,
+                                     "de_evals" => c2f_stage.de_evals,
+                                     "elapsed_s" => c2f_stage.elapsed_s,
+                                     "seed" => c2f_stage.seed),
+            "J_fine_at_theta_coarse" => obj(c2f_stage.theta)[1])
+    end
     if adaptive_rep !== nothing
         solution["adaptive"] = OrderedDict(
             "base" => args["adaptive-base"], "level" => args["adaptive-level"],

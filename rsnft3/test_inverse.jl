@@ -6,6 +6,7 @@ const TESTS = [
     ("param_data",   joinpath(@__DIR__, "test_param_data.jl")),
     ("objective",    joinpath(@__DIR__, "test_objective.jl")),
     ("criteria",     joinpath(@__DIR__, "test_criteria.jl")),
+    ("inverse_c2f",  joinpath(@__DIR__, "test_inverse_c2f.jl")),
 ]
 const EXE = joinpath(Sys.BINDIR, Sys.iswindows() ? "julia.exe" : "julia")
 results = Tuple{String,Bool}[]

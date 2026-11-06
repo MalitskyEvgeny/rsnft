@@ -224,3 +224,61 @@ function polish_from(obj::Objective, θ0::Vector{Float64}; nm_iterations::Int = 
     return InversionResult(θ, J, info.J_T, info.J_Ro, info.J_reg,
                            0, nm_evals, time() - t0, 0)
 end
+
+# --- coarse-to-fine (иерархия сеток) ------------------------------------------
+
+"Результат coarse-стадии c2f: θ, J и времена на грубой сетке."
+struct C2fStage
+    theta::Vector{Float64}
+    J::Float64
+    de_evals::Int
+    elapsed_s::Float64
+    seed::Int
+end
+
+"DE-поиск на грубом Objective (без NM): θ, J, число оценок DE.
+Воркер-режим требует, чтобы воркеры И главный имели проинициализированный
+_WORKER_OBJ (смотри c2f_stage_init! в run_inverse.jl)."
+function de_stage(obj::Objective; de_budget::Int, seed::Int, trace::Bool = false)
+    f_eval = nprocs() > 1 && _WORKER_OBJ[] !== nothing ? worker_J : (θ -> obj(θ)[1])
+    θde, Jde, de_evals = de_search(f_eval, obj.layout;
+                                   de_budget = de_budget, seed = seed, trace = trace)
+    return C2fStage(collect(Float64.(θde)), Float64(Jde), de_evals, 0.0, seed)
+end
+
+"""
+    invert_c2f(obj_coarse, obj_fine; de_budget, nm_iterations, multilevel,
+               seed, trace, max_f_calls) -> (InversionResult, C2fStage)
+
+Двухстадийная инверсия: DE на obj_coarse (грубая сетка; воркер-режим — через
+worker_J), затем NM-полировка на obj_fine от θ_coarse (polish_from, с
+многоуровневостью по эпохам). Layout у обоих Objective одинаков — θ
+переносится без пересчёта. Второе значение — coarse-стадия для отчёта.
+
+Вызов (пере)инициализации воркеров и главного `_WORKER_OBJ[]` под нужную
+стадию — обязанность вызывающей стороны (см. c2f_worker_reinit! в
+run_inverse.jl): invert_c2f не знает параметров датасета.
+"""
+function invert_c2f(obj_coarse::Objective, obj_fine::Objective;
+                    de_budget::Int = 4000, nm_iterations::Int = 200,
+                    multilevel::Bool = true, seed::Int = 1, trace::Bool = false,
+                    max_f_calls::Int = 0)
+    length(obj_coarse.layout) == length(obj_fine.layout) ||
+        error("c2f: coarse and fine layouts must match")
+    t0 = time()
+    stage = de_stage(obj_coarse; de_budget = de_budget, seed = seed, trace = trace)
+    println(@sprintf("C2F stage A (coarse): J=%.1f in %.1fs (DE evals %d)",
+                     stage.J, time() - t0, stage.de_evals))
+    polished = polish_from(obj_fine, stage.theta; nm_iterations = nm_iterations,
+                           multilevel = multilevel, max_f_calls = max_f_calls)
+    return polished, stage
+end
+
+"Переинициализация воркеров под стадию c2f: для каждого воркера —
+удалённый вызов пере-инициализатора f под SolverConfig данной стадии."
+function c2f_stage_init!(f::Function, args...; kwargs...)
+    for w in workers()
+        remotecall_fetch(f, w, args...; kwargs...)
+    end
+    return nothing
+end
