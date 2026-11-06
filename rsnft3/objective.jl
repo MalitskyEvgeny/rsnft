@@ -143,12 +143,22 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
     t_targets = TTarget[]
     n_dropped = 0
     gnx, gnz = size(active, 2), size(active, 1)
-    stencil_ok(x, z) = begin
-        fx = (x - xg[1]) / (xg[2] - xg[1]) + 0.5
-        fz = (z - zg[1]) / (zg[2] - zg[1]) + 0.5
-        i0 = clamp(floor(Int, fx), 1, gnx); i1 = clamp(i0 + 1, 1, gnx)
-        j0 = clamp(floor(Int, fz), 1, gnz); j1 = clamp(j0 + 1, 1, gnz)
-        active[j0, i0] && active[j0, i1] && active[j1, i0] && active[j1, i1]
+    # Дополнительно к активному стенсилу отсекаем вырожденные: если активные
+    # углы билинейного стенсила несут < BILINEAR_DEN_RATIO полной суммы весов,
+    # точка у тонкого клина не представима — исключаем на этапе маски (DE не
+    # видит «геометрию попаданий»). Веса считаются в конвенции bilinear_sample.
+    function stencil_ok(x, z)
+        nx, nz = gnx, gnz
+        ux = (x - xg[1]) / (xg[2] - xg[1])
+        uz = (z - zg[1]) / (zg[2] - zg[1])
+        i0 = clamp(floor(Int, ux) + 1, 1, nx); i1 = clamp(i0 + 1, 1, nx)
+        j0 = clamp(floor(Int, uz) + 1, 1, nz); j1 = clamp(j0 + 1, 1, nz)
+        tx = clamp(ux - (i0 - 1), 0.0, 1.0); tz = clamp(uz - (j0 - 1), 0.0, 1.0)
+        (active[j0, i0] && active[j0, i1] && active[j1, i0] && active[j1, i1]) || return false
+        w00 = (1-tx)*(1-tz); w10 = tx*(1-tz); w01 = (1-tx)*tz; w11 = tx*tz
+        den = (active[j0, i0] ? w00 : 0.0) + (active[j0, i1] ? w10 : 0.0) +
+              (active[j1, i0] ? w01 : 0.0) + (active[j1, i1] ? w11 : 0.0)
+        den >= BILINEAR_DEN_RATIO
     end
     for p in wells.points
         if p.kind === :T
