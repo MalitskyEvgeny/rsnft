@@ -25,7 +25,7 @@
 #   --adaptive-level N  адаптивный уровень инверсии (2)
 #   --uniform           равномерные сетки вместо адаптивных
 #   --nx N --nz N       сетка равномерной прямой задачи (60 120; только с --uniform)
-#   --ensemble N --workers N --de-budget N --nm-iterations N --threads N
+#   --ensemble N (3) --workers N --de-budget N (4000) --nm-iterations N (200) --threads N
 #   --sigma-T F --sigma-Ro F --reg F --seed N
 #   --theta0-file FILE  полировка из готового solution.json (DE пропускается)
 #   --out DIR           каталог отчёта (results/report_full_<timestamp>)
@@ -52,11 +52,11 @@ ADAPTIVE_LEVEL=2
 UNIFORM=0
 NX=60
 NZ=120
-ENSEMBLE=1
+ENSEMBLE=3
 WORKERS=1
-DE_BUDGET=2000
+DE_BUDGET=4000
 THREADS=8
-NM_ITERATIONS=30
+NM_ITERATIONS=200
 SIGMA_T=2.0
 SIGMA_RO=0.05
 REG=1.0

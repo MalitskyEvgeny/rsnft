@@ -48,7 +48,7 @@ function parse_cli()
         "--picard-iters"  ; arg_type = Int; default = 3
         "--picard-tol"    ; arg_type = Float64; default = 1.0e-3
         "--pcg-tol"       ; arg_type = Float64; default = 1.0e-8; help = "PCG relative tolerance"
-        "--max-f-calls"   ; arg_type = Int; default = 0; help = "bound NM by J-evaluations (0 = unbounded)"
+        "--max-f-calls"   ; arg_type = Int; default = -1; help = "bound NM by J-evaluations (-1 = dynamic: 2x nm-iterations x epoch-levels; 0 = unbounded)"
         "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
         "--adaptive-final"; action = :store_true; help = "control stage: evaluate criteria on the adaptive grid at the best theta"
         "--adaptive-search"; action = :store_true; help = "run the ENTIRE pipeline (search + criteria) on the adaptive grid; no uniform grid anywhere"
@@ -95,6 +95,10 @@ end
 
 function main()
     args = parse_cli()
+    # 4.4: динамический бюджет полировки по умолчанию — не «тихое удешевление»,
+    # а ограничение сверху: NM обычно сходится раньше, лимит режет хвосты.
+    args["max-f-calls"] == -1 &&
+        (args["max-f-calls"] = 2 * args["nm-iterations"] * length(parse_epochs(args["epochs"])))
     try
         validate_flags(args)
     catch err
