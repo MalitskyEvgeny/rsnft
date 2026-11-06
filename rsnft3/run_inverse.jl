@@ -334,6 +334,8 @@ function main()
 
     (obj.n_artifact_T[] > 0 || obj.n_artifact_Ro[] > 0) && @warn "Артефактные выборки в лучшем прогоне" n_artifact_T = obj.n_artifact_T[] n_artifact_Ro = obj.n_artifact_Ro[]
 
+    cache_save(obj; force = true)          # финальная запись кэша (2.2)
+
     solution = OrderedDict{String,Any}(
         "status" => "complete",
         "data_dir" => abspath(args["data-dir"]),

@@ -66,6 +66,8 @@ struct Objective
     n_artifact_Ro::Base.RefValue{Int}      # кумулятивно: артефактные выборки Ro
     cache::Dict{String,Vector{Float64}}    # key -> [J, J_T, J_Ro, J_reg]
     cache_path::String                     # "" — только в памяти
+    ctx_hash::String                       # контекст задачи в ключе кэша (F4)
+    _dirty::Base.RefValue{Int}             # свежие оценки с последней записи кэша
     evals::Base.RefValue{Int}
     geometry::Any                          # ForwardGeometry | AdaptiveGeometry
     backend::Symbol                        # :regular | :adaptive
@@ -172,7 +174,10 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
         le === nothing && continue
         push!(ro_targets, RoTarget(p.x, le[1], le[2], p.value, p.sigma))
     end
-    cache_path = isempty(cache_dir) ? "" : joinpath(cache_dir, "j_cache.json")
+    cache_path = isempty(cache_dir) ? "" : joinpath(cache_dir, "j_cache_v2.json")
+    if isempty(cache_dir) == false && isfile(joinpath(cache_dir, "j_cache.json"))
+        @warn "Найден старый j_cache.json — формат v1 без контекстного ключа, игнорируется (новый: j_cache_v2.json)"
+    end
     cache = Dict{String,Vector{Float64}}()
     if !isempty(cache_path) && isfile(cache_path)
         for (k, v) in JSON.parsefile(cache_path)
@@ -182,9 +187,17 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
         end
     end
     geometry = backend === :adaptive ? adaptive_geo : precompute_geometry(data, cfg)
+    ctx = OrderedDict(
+        "version" => J_CACHE_VERSION, "input" => data.fingerprint,
+        "nx" => cfg.nx, "nz" => cfg.nz,
+        "epochs" => layout.epochs, "nodes_x" => layout.nodes_x,
+        "lower" => layout.lower, "upper" => layout.upper,
+        "reg" => reg, "weight_ro" => weight_ro,
+        "backend" => String(backend),
+        "n_T" => length(t_targets), "n_Ro" => length(ro_targets))
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
                      t_targets, ro_targets, n_dropped, Ref(0), Ref(0),
-                     cache, cache_path, Ref(0),
+                     cache, cache_path, bytes2hex(sha256(JSON.json(ctx)))[1:16], Ref(0),
                      geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
 end
 
@@ -208,22 +221,33 @@ n_targets(obj::Objective, kind::Symbol) =
 "Вызов objective(θ) -> (J, info); сам Objective хранит кэш, счётчики и мишени."
 (obj::Objective)(θ::AbstractVector{<:Real}) = evaluate(obj, θ)
 
-cache_key(θ::AbstractVector{<:Real}) =
-    bytes2hex(sha256(join(string.(round.(Float64.(θ); digits = 10)), ",")))
+const J_CACHE_VERSION = 2
+
+"Ключ кэша: θ ⊕ контекст (данные, сетка, layout, reg, weight_ro, backend, версия) — F4."
+cache_key(θ::AbstractVector{<:Real}, ctx_hash::AbstractString = "") =
+    bytes2hex(sha256(join(string.(round.(Float64.(θ); digits = 10)), ",") * "|" * ctx_hash))[1:16]
 
 json_safe(v::Vector{Float64}) = Any[isfinite(x) ? x : nothing for x in v]
 
-function cache_save(obj::Objective)
+const CACHE_SAVE_EVERY = 64
+
+function cache_save(obj::Objective; force::Bool = false)
     isempty(obj.cache_path) && return
+    # 2.2: пишем раз в CACHE_SAVE_EVERY свежих оценок (или force) — не на каждой
+    obj._dirty === nothing || (force = force || obj._dirty[] >= CACHE_SAVE_EVERY)
+    force || return
     mkpath(dirname(obj.cache_path))
-    open(obj.cache_path, "w") do f
+    tmp = obj.cache_path * ".tmp"
+    open(tmp, "w") do f
         JSON.print(f, OrderedDict(k => json_safe(v) for (k, v) in obj.cache))
     end
+    mv(tmp, obj.cache_path; force = true)      # атомарно на практике
+    obj._dirty === nothing || (obj._dirty[] = 0)
 end
 
 "Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info)."
 function evaluate(obj::Objective, θ::AbstractVector{<:Real})
-    key = cache_key(θ)
+    key = cache_key(θ, obj.ctx_hash)
     if haskey(obj.cache, key)
         v = obj.cache[key]
         return v[1], (J_T = v[2], J_Ro = v[3], J_reg = v[4], cached = true,
@@ -277,6 +301,7 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
 
     J = J_T + obj.weight_ro * J_Ro + J_reg
     obj.cache[key] = [J, J_T, J_Ro, J_reg]
+    obj._dirty[] += 1
     cache_save(obj)
     return J, (J_T = J_T, J_Ro = J_Ro, J_reg = J_reg, cached = false,
                n_artifact_T = n_art_T, n_artifact_Ro = n_art_Ro,
