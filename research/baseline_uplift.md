@@ -60,3 +60,7 @@ julia --project=. run_inverse.jl --data-dir "../Данные для обратн
 Коммиты ad30568..6cc2c80 (2.1-2.7 + фикс make_objective: потерянный arg `evals::RefValue{Int}` в вызове Objective, ломал worker_init! при workers>1 — баг внёсён в ad30568, найден по MethodError на воркере, зафиксирован 6cc2c80).
 - Прогон 1: J=24412.75 (J_T=19683.06, J_Ro=904.42, J_reg=3825.27), elapsed=199.9s, n_artifact_T/Ro(main)=0, per-well artifacts 1/2/0/0/0, passed=false (строгая приёмка). Совпадает с Phase 1 smoke — регрессии нет.
 - Прогон 2 (тот же seed/out, контекстный ключ j_cache_v2 совпал): J=24412.75, elapsed=86.9s → кэш-попадание даёт ускорение x2.3 на полном пайплайне.
+
+## Review 2 (Phase 2) — BLOCK -> исправлено
+- P1 (исправлен, 730ab94): ctx_hash не покрывал sigma/таргеты/допуски solver — повторный запуск с другим sigma-T в тот же out молча переиспользовал устаревший J. Добавлены таргеты, max_dt_ma, picard/pcg, adaptive_cfg; J_CACHE_VERSION=3.
+- P2 (бэклог): (1) c2f serial-ветка ensemble<nworkers: stage A идёт на fine-сетке воркеров (нет пере-инициализации под coarse) — дефект до Phase 2, результаты корректны; (2) запись J_fine_at_theta_coarse и кэши weight-ro-cal идут после финального forced cache_save — последние оценки могут не попасть в JSON; (3) test-покрытие cache нет (тесты заморожены).
