@@ -8,8 +8,15 @@
 #   julia adaptive_basin_fvm.jl --data-dir data --cache-dir adaptive_results
 
 isdefined(@__MODULE__, :BasinDataset) || include(joinpath(@__DIR__, "basin_fvm.jl"))
+include(joinpath(@__DIR__, "config_check.jl"))
 
-const DEFAULT_DATA_DIR = raw"C:\Users\solo\Desktop\МЭИ\3 мага\роснефть\data1"
+const DEFAULT_DATA_DIR = joinpath(@__DIR__, "..", "Данные для обратной задачи")
+"Фатально, если дефолтный каталог данных не найден (F8: вместо личного пути)."
+function default_data_dir_or_error()
+    isdir(DEFAULT_DATA_DIR) ||
+        throw(ErrorException("каталог данных по умолчанию не найден: $DEFAULT_DATA_DIR; укажите --data-dir явно"))
+    return DEFAULT_DATA_DIR
+end
 
 # ----------------------------------------------------------------------------
 # Конфигурация
@@ -915,7 +922,7 @@ function main_adaptive(argv = ARGS)
     @add_arg_table! s begin
         "--data-dir"
             arg_type = String
-            default = DEFAULT_DATA_DIR
+            default = default_data_dir_or_error()
         "--cache-dir"
             arg_type = String
             default = "adaptive_results"
@@ -959,6 +966,7 @@ function main_adaptive(argv = ARGS)
     validate(config)
     cache_dir = args["cache-dir"]
     mkpath(cache_dir)
+    validate_inputs(args["data-dir"], "", cache_dir)
     data = load_dataset(args["data-dir"], cache_dir)
     run_id = adaptive_run_id(data, config)
     run_dir = joinpath(cache_dir, run_id)
