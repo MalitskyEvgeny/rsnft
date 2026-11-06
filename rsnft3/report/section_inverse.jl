@@ -42,11 +42,23 @@ function section_inverse(io::IOBuffer, iv::InverseData)
     println(io, "<h2 class=\"sec\">Обратная задача — «", esc(iv.run_name), "»</h2>")
 
     pass2s = _pass(c)
-    println(io, "<h3>Приёмка (условие 18)</h3>")
+    n_art = get(c, "n_artifact", nothing)
+    n_kept = get(c, "n_kept", nothing)
+    println(io, "<h3>Приёмка (условие 18, строгая)</h3>")
     println(io, "<p><span class=\"badge ", pass2s ? "ok" : "bad", "\">",
             pass2s ? "ПРОЙДЕНО" : "НЕ ВЫПОЛНЕНО", "</span> ",
-            "<span class=\"small\">RMSE ≤ 2σ и ≥ 95% точек в пределах 2σ</span></p>")
+            "<span class=\"small\">RMSE ≤ 2σ и ≥ 95% точек в пределах 2σ и 0 артефактных точек</span></p>")
     println(io, "<div class=\"cards\">")
+    if n_art !== nothing && n_art > 0
+        println(io, "<p class=\"small\"><b>Артефактные точки: ", n_art,
+                "</b> — модель в этих точках не определена (вырожденная/NaN-выборка); ",
+                "приёмка не может считаться пройденной.</p>")
+    end
+    if n_art !== nothing && n_kept !== nothing
+        tot = n_art + n_kept
+        tot > 0 && println(io, "<p class=\"small\">Доля артефактных точек: ",
+                @sprintf("%.1f%%", 100.0 * n_art / tot), " (kept ", n_kept, " / dropped ", n_art, ")</p>")
+    end
     okT = c["frac_2s_T"] === nothing || c["frac_2s_T"] >= 0.95
     okR = c["frac_2s_Ro"] === nothing || c["frac_2s_Ro"] >= 0.95
     defT = c["frac_2s_T"] === nothing ? "" :
@@ -75,10 +87,12 @@ function section_inverse(io::IOBuffer, iv::InverseData)
 end
 
 function _pass(c::AbstractDict)
+    haskey(c, "passed") && return c["passed"] === true
     f2T, f2R = c["frac_2s_T"], c["frac_2s_Ro"]
     okT = f2T === nothing || f2T >= 0.95
     okR = f2R === nothing || f2R >= 0.95
-    return okT && okR
+    n_art = get(c, "n_artifact", 0)
+    return okT && okR && n_art == 0
 end
 
 function _metric(io::IOBuffer, label::String, value::String)
