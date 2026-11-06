@@ -85,7 +85,7 @@ function worker_init_c2f!(data_dir::AbstractString, wells::WellSet,
                           reg::Real = 1.0, weight_ro::Real = 1.0,
                           max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
                           picard_tolerance_c::Real = 1.0e-3,
-                          pcg_tolerance::Real = 1.0e-8)
+                          pcg_tolerance::Real = 1.0e-6)
     data = load_dataset_derived(data_dir, Workbook())
     layout = make_q_layout(data; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x,
                            nodes_x = nodes_x)
@@ -141,11 +141,18 @@ end
 BBO 0.6.12 obsolete и молча игнорируется — без Random.seed! прогон
 невоспроизводим даже при том же seed."
 function de_search(f_eval, layout; de_budget::Int, seed::Int, trace::Bool = false,
-                   warm_start = nothing)
+                   warm_start = nothing, progress_chan = nothing)
     Random.seed!(seed)
-    de_cb(ctrl) = Progress.bar_add(0, @sprintf("DE search · eval %d/%d · best J=%.1f",
-                                               BlackBoxOptim.num_func_evals(ctrl), de_budget,
-                                               best_fitness(ctrl)))
+    de_cb(ctrl) = begin
+        fe = BlackBoxOptim.num_func_evals(ctrl)
+        Jb = best_fitness(ctrl)
+        if progress_chan === nothing
+            Progress.bar_add(0, @sprintf("DE search · eval %d/%d · best J=%.1f",
+                                         fe, de_budget, Jb))
+        else
+            put!(progress_chan, (myid(), fe, Jb))
+        end
+    end
     Progress.bar_start(de_budget, "DE search")
     res = bboptimize(f_eval, warm_start;
                      SearchRange = collect(zip(layout.lower, layout.upper)),
@@ -192,10 +199,11 @@ end
 "Одна инверсия: DE по всему θ → NM-полировка по уровням эпох. f_eval(θ) -> J."
 function invert_single(f_eval, layout; de_budget::Int = 4000, multilevel::Bool = true,
                        seed::Int = 1, nm_iterations::Int = 200, trace::Bool = false,
-                       max_f_calls::Int = 0, warm_start = nothing)
+                       max_f_calls::Int = 0, warm_start = nothing, progress_chan = nothing)
     t0 = time()
     θde, Jde, de_evals = de_search(f_eval, layout; de_budget = de_budget, seed = seed,
-                                   trace = trace, warm_start = warm_start)
+                                   trace = trace, warm_start = warm_start,
+                                   progress_chan = progress_chan)
     θ = collect(Float64.(θde))
     nm_evals = polish_nm!(f_eval, layout, θ; multilevel = multilevel,
                           nm_iterations = nm_iterations, max_f_calls = max_f_calls)
@@ -262,6 +270,21 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
     idle = ws[:]
     busy = Dict{Int,Vector{Future}}()          # воркер -> отправленные туда старты
     next_start = 1
+    # живой DE-прогресс с воркеров: колбэк de_search кладёт (pid, f_calls, J),
+    # читатель на главном двигает полосу; сумма по всем стартам = ensemble·budget
+    chan = RemoteChannel(() -> Channel{Tuple{Int,Int,Float64}}(64))
+    Progress.bar_start(ensemble * de_budget, "DE search (ensemble)")
+    last_fe = Dict{Int,Int}()
+    reader = @async begin
+        while true
+            msg = try take!(chan) catch; break end
+            delta = msg[2] - get(last_fe, msg[1], 0)
+            last_fe[msg[1]] = msg[2]
+            Progress.bar_add(delta, @sprintf("DE search · worker %d · eval %d/%d · best J=%.1f",
+                                             msg[1], msg[2], de_budget, msg[3]))
+        end
+        Progress.bar_finish()
+    end
     while next_start <= ensemble || !isempty(busy)
         while next_start <= ensemble && !isempty(idle)
             w = popfirst!(idle)
@@ -270,7 +293,8 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
                            (de_budget = de_budget, multilevel = multilevel,
                             seed = seed0 + s - 1, nm_iterations = nm_iterations,
                             trace = trace, max_f_calls = max_f_calls,
-                            warm_start = (s == 1 ? warm_start : nothing)))
+                            warm_start = (s == 1 ? warm_start : nothing),
+                            progress_chan = chan))
             futures[s] = f
             push!(get!(busy, w, Future[]), f)
             next_start += 1
@@ -288,6 +312,8 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
         Progress.step_note(@sprintf("ensemble starts: %d/%d done", done_count, ensemble))
     end
     results = [fetch(f) for f in futures]
+    close(chan)
+    wait(reader)
     merge_worker_caches!(obj)
     return sort!(results; by = r -> r.J)
 end
@@ -333,7 +359,7 @@ function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{T
                       n_nodes::Int, mid_x::Float64, nx::Int, nz::Int;
                       reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "",
                       max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
-                      picard_tolerance_c::Real = 1.0e-3, pcg_tolerance::Real = 1.0e-8,
+                      picard_tolerance_c::Real = 1.0e-3, pcg_tolerance::Real = 1.0e-6,
                       nodes_x::Union{Nothing,Vector{Float64}} = nothing)
     global INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT
     INV_DATA = load_dataset_derived(data_dir, Workbook())
@@ -426,7 +452,8 @@ function invert_start_c2f_on_worker(kw::NamedTuple)
         error("воркер не инициализирован для c2f (worker_init_c2f!)")
     t0 = time()
     θde, Jde, de_evals = de_search(worker_J_coarse, _WORKER_OBJ_COARSE[].layout;
-                                   de_budget = de_budget, seed = seed, trace = trace)
+                                   de_budget = de_budget, seed = seed, trace = trace,
+                                   progress_chan = get(kw, :progress_chan, nothing))
     stage = C2fStage(collect(Float64.(θde)), Float64(Jde), de_evals, 0.0, seed)
     polished = polish_from(_WORKER_OBJ[], stage.theta; nm_iterations = nm_iterations,
                            multilevel = multilevel, max_f_calls = max_f_calls)
@@ -452,6 +479,20 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
     idle = ws[:]
     busy = Dict{Int,Vector{Future}}()
     next_start = 1
+    # # живой прогресс стадии A (coarse DE) с воркеров
+    chan = RemoteChannel(() -> Channel{Tuple{Int,Int,Float64}}(64))
+    Progress.bar_start(ensemble * de_budget, "DE search (c2f coarse ensemble)")
+    last_fe = Dict{Int,Int}()
+    reader = @async begin
+        while true
+            msg = try take!(chan) catch; break end
+            delta = msg[2] - get(last_fe, msg[1], 0)
+            last_fe[msg[1]] = msg[2]
+            Progress.bar_add(delta, @sprintf("DE search (coarse) · worker %d · eval %d/%d · best J=%.1f",
+                                             msg[1], msg[2], de_budget, msg[3]))
+        end
+        Progress.bar_finish()
+    end
     while next_start <= ensemble || !isempty(busy)
         while next_start <= ensemble && !isempty(idle)
             w = popfirst!(idle)
@@ -459,7 +500,8 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
             f = remotecall(invert_start_c2f_on_worker, w,
                            (de_budget = de_budget, nm_iterations = nm_iterations,
                             multilevel = multilevel, seed = seed0 + s - 1,
-                            trace = trace, max_f_calls = max_f_calls))
+                            trace = trace, max_f_calls = max_f_calls,
+                            progress_chan = chan))
             futures[s] = f
             push!(get!(busy, w, Future[]), f)
             next_start += 1
@@ -475,6 +517,8 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
         end
     end
     pairs = [fetch(f) for f in futures]
+    close(chan)
+    wait(reader)
     results = InversionResult[p[1] for p in pairs]
     stages = C2fStage[p[2] for p in pairs]
     merge_worker_caches_c2f!(obj_coarse, obj_fine)
