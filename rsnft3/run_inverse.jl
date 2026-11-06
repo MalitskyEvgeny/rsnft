@@ -332,6 +332,8 @@ function main()
                         100 * adaptive_rep.frac_2s_T))
     end
 
+    (obj.n_artifact_T[] > 0 || obj.n_artifact_Ro[] > 0) && @warn "Артефактные выборки в лучшем прогоне" n_artifact_T = obj.n_artifact_T[] n_artifact_Ro = obj.n_artifact_Ro[]
+
     solution = OrderedDict{String,Any}(
         "status" => "complete",
         "data_dir" => abspath(args["data-dir"]),
@@ -349,6 +351,8 @@ function main()
                 (nprocs() > 1 && args["ensemble"] >= nworkers()) ? "parallel" : "serial")),
         "observations" => wellset_summary(wells),
         "n_dropped_T_inactive" => obj.n_dropped_T,
+        "n_artifact_T" => obj.n_artifact_T[],
+        "n_artifact_Ro" => obj.n_artifact_Ro[],
         "ensemble" => [OrderedDict(
             "theta" => r.theta, "J" => r.J, "J_T" => r.J_T, "J_Ro" => r.J_Ro,
             "J_reg" => r.J_reg, "de_evals" => r.de_evals, "nm_evals" => r.nm_evals,
