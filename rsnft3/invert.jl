@@ -216,7 +216,16 @@ end
 "Ансамбль стартов параллельно: один старт целиком (DE серийно + NM серийно) на
 одном воркере, старты отправляются динамически по свободным воркерам — DE
 старта s+1 перекрывается с NM старта s. Детерминизм: seed = seed0+s-1, сбор в
-порядке стартов, сортировка по J; слияние кэшей воркеров в главный."
+порядке стартов, сортировка по J; слияние кэшей воркеров в главный.
+
+F11: воркеры инициализируются явным remotecall(worker_init!/worker_init_c2f!)
+в run_inverse.jl ДО вызовов invert_ensemble_parallel — Objective не
+пересылается по сети (нельзя: BasinDataset/Ref'ы не сериализуемы надёжно,
+отсюда warning «Cannot transfer global variable _WORKER_OBJ», если пытаться).
+Воркеры уже инициализированы с собственным _WORKER_OBJ[] (см. _WORKER_OBJ выше).
+Многопоточность (Threads): Random.seed! в de_search сеет глобальный RNG
+задачи; при будущей threads-параллелизации сеять per-task RNG
+(Random.default_rng()/Xoshiro(seed)), иначе синхронизация семян сломается."
 function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::Int = 4000,
                                   multilevel::Bool = true, seed0::Int = 1,
                                   nm_iterations::Int = 200, trace::Bool = false,

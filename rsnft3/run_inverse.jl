@@ -44,6 +44,7 @@ function parse_cli()
         "--no-multilevel" ; action = :store_true
         "--theta0-file"   ; default = ""; help = "solution.json to polish from (skips DE unless --de-warm-start; grid-hierarchy fallback)"
         "--de-warm-start" ; action = :store_true; help = "with --theta0-file: run DE warm-started from theta0 (injected into the start population) + NM polish; de-budget > 0 required"
+        "--q-true"        ; default = ""; help = "twin mode: theta_true as one q per epoch (like make_twin --q); adds theta_true vs theta_hat table to solution.json/report"
         "--max-dt-ma"     ; arg_type = Float64; default = 2.5; help = "solver max time step, Ma"
         "--picard-iters"  ; arg_type = Int; default = 3
         "--picard-tol"    ; arg_type = Float64; default = 1.0e-3
@@ -386,6 +387,14 @@ function main()
         "status" => "complete",
         "data_dir" => abspath(args["data-dir"]),
         "wells_spec" => args["wells"],
+        "theta_true" => isempty(args["q-true"]) ? nothing :
+                        begin
+                            qe = parse.(Float64, split(args["q-true"], ","))
+                            length(qe) == length(layout.epochs) ||
+                                error("--q-true: нужно одно значение на эпоху ($(length(layout.epochs)))")
+                            OrderedDict("epoch_q_mwm2" => qe,
+                                        "theta" => collect(theta_constant(layout, qe)))
+                        end,
         "grid" => OrderedDict("nx" => nx, "nz" => nz,
                               "search_backend" => args["adaptive-search"] ? "adaptive" : "regular"),
         "layout" => OrderedDict("names" => layout.names, "nodes_x" => layout.nodes_x,
