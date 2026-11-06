@@ -94,18 +94,8 @@ function validate_flags(args)
     return nothing
 end
 
-function main()
-    args = parse_cli()
-    # 4.4: динамический бюджет полировки по умолчанию — не «тихое удешевление»,
-    # а ограничение сверху: NM обычно сходится раньше, лимит режет хвосты.
-    args["max-f-calls"] == -1 &&
-        (args["max-f-calls"] = 2 * args["nm-iterations"] * length(parse_epochs(args["epochs"])))
-    try
-        validate_flags(args)
-    catch err
-        println(stderr, "ОШИБКА КОНФИГУРАЦИИ: ", sprint(showerror, err))
-        exit(1)
-    end
+"7.1: подготовка общего контекста инверсии (данные, layout, воркеры, objective)."
+function setup_inverse(args)
     nx, nz = parse.(Int, split(args["grid"], ","))
     out_dir = abspath(args["out"])
     validate_inputs(args["data-dir"], args["wells"], out_dir)
@@ -170,9 +160,22 @@ function main()
                          backend = args["adaptive-search"] ? :adaptive : :regular,
                          adaptive_cfg = acfg)
     _WORKER_OBJ[] = obj      # BlackBoxOptim вызывает fitness и на главном
+    return (args = args, nx = nx, nz = nz, out_dir = out_dir, t_start = t_start,
+            data = data, wells = wells, layout = layout, cfg = cfg, obj = obj,
+            node_xs = node_xs, cache_dir = cache_dir, acfg = acfg)
+end
 
+"7.1: ветка --c2f. Возвращает (results, best, c2f_stage, c2f_stages, cde)."
+function mode_c2f(ctx)
+    args = ctx.args
+    obj = ctx.obj
+    data, wells, layout, out_dir = ctx.data, ctx.wells, ctx.layout, ctx.out_dir
+    nx, nz = ctx.nx, ctx.nz
+    node_xs = ctx.node_xs
     c2f_stage = nothing
-    if args["c2f"]
+    c2f_stages = C2fStage[]
+    cde = 0
+    if true
         # Stage A (coarse): DE на грубой regular-сетке; layout тот же.
         cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
         # 2.7: грубая стадия исторически в ~7 раз дольше полировки — дефолт 25%
@@ -282,49 +285,90 @@ function main()
             end
             _WORKER_OBJ[] = obj
         end
-    elseif !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
-        src = JSON.parsefile(args["theta0-file"])
-        theta0 = Float64.(src["best"]["theta"])
-        ladder = parse.(Float64, split(args["weight-ro-cal"], ","))
-        best = nothing; results = []
-        for wr in ladder
-            wobj = make_objective(data, wells, cfg, layout; reg = args["reg"],
-                                  weight_ro = wr, cache_dir = joinpath(cache_dir, "wr$wr"))
-            r = polish_from(wobj, theta0; nm_iterations = args["nm-iterations"],
-                            multilevel = !args["no-multilevel"],
-                            max_f_calls = args["max-f-calls"])
-            println(@sprintf("weight_ro=%.0f: J=%.1f (J_T=%.1f J_Ro=%.1f J_reg=%.1f)",
-                             wr, r.J, r.J_T, r.J_Ro, r.J_reg))
-            push!(results, r)
-        end
-        sort!(results; by = r -> r.J)
-        best = first(results)
-    elseif !isempty(args["theta0-file"])
-        src = JSON.parsefile(args["theta0-file"])
-        theta0 = Float64.(src["best"]["theta"])
-        if args["de-warm-start"]
-            println("DE warm-start from $(args["theta0-file"]): J=$(src["best"]["J"]), budget $(args["de-budget"])")
-            length(theta0) == length(layout) || error("theta0 dimension mismatch: $(length(theta0)) vs layout $(length(layout))")
-            clamp!(theta0, layout.lower, layout.upper)
-            results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
-                                      multilevel = !args["no-multilevel"], seed0 = args["seed"],
-                                      nm_iterations = args["nm-iterations"],
-                                      max_f_calls = args["max-f-calls"], warm_start = theta0)
-        else
-            println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
-            results = [polish_from(obj, theta0; nm_iterations = args["nm-iterations"],
-                                   multilevel = !args["no-multilevel"],
-                                   max_f_calls = args["max-f-calls"])]
-        end
-        best = first(results)
-    else
+    end
+    return (results = results, best = best, c2f_stage = c2f_stage,
+            c2f_stages = c2f_stages, cde = cde)
+end
+
+"7.1: ветка --weight-ro-cal (лестница weight_ro на theta0)."
+function mode_weight_ro_cal(ctx)
+    args = ctx.args
+    data, wells, cfg, layout, cache_dir = ctx.data, ctx.wells, ctx.cfg, ctx.layout, ctx.cache_dir
+    src = JSON.parsefile(args["theta0-file"])
+    theta0 = Float64.(src["best"]["theta"])
+    ladder = parse.(Float64, split(args["weight-ro-cal"], ","))
+    best = nothing; results = []
+    for wr in ladder
+        wobj = make_objective(data, wells, cfg, layout; reg = args["reg"],
+                              weight_ro = wr, cache_dir = joinpath(cache_dir, "wr$wr"))
+        r = polish_from(wobj, theta0; nm_iterations = args["nm-iterations"],
+                        multilevel = !args["no-multilevel"],
+                        max_f_calls = args["max-f-calls"])
+        println(@sprintf("weight_ro=%.0f: J=%.1f (J_T=%.1f J_Ro=%.1f J_reg=%.1f)",
+                         wr, r.J, r.J_T, r.J_Ro, r.J_reg))
+        push!(results, r)
+    end
+    sort!(results; by = r -> r.J)
+    best = first(results)
+    return (results = results, best = best)
+end
+
+"7.1: ветка --theta0-file (polish-only или DE warm-start)."
+function mode_theta0(ctx)
+    args = ctx.args
+    obj = ctx.obj
+    layout = ctx.layout
+    src = JSON.parsefile(args["theta0-file"])
+    theta0 = Float64.(src["best"]["theta"])
+    if args["de-warm-start"]
+        println("DE warm-start from $(args["theta0-file"]): J=$(src["best"]["J"]), budget $(args["de-budget"])")
+        length(theta0) == length(layout) || error("theta0 dimension mismatch: $(length(theta0)) vs layout $(length(layout))")
+        clamp!(theta0, layout.lower, layout.upper)
         results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
                                   multilevel = !args["no-multilevel"], seed0 = args["seed"],
                                   nm_iterations = args["nm-iterations"],
-                                  max_f_calls = args["max-f-calls"])
-        best = first(results)
+                                  max_f_calls = args["max-f-calls"], warm_start = theta0)
+    else
+        println("POLISH from $(args["theta0-file"]): J=$(src["best"]["J"])")
+        results = [polish_from(obj, theta0; nm_iterations = args["nm-iterations"],
+                               multilevel = !args["no-multilevel"],
+                               max_f_calls = args["max-f-calls"])]
     end
+    best = first(results)
+    return (results = results, best = best)
+end
 
+"7.1: обычный режим - DE-ансамбль с нуля."
+function mode_plain(ctx)
+    args = ctx.args
+    obj = ctx.obj
+    results = invert_ensemble(obj; ensemble = args["ensemble"], de_budget = args["de-budget"],
+                              multilevel = !args["no-multilevel"], seed0 = args["seed"],
+                              nm_iterations = args["nm-iterations"],
+                              max_f_calls = args["max-f-calls"])
+    best = first(results)
+    return (results = results, best = best)
+end
+
+"7.1: диспетчер режимов по флагам."
+function run_mode(ctx)
+    args = ctx.args
+    if args["c2f"]
+        return mode_c2f(ctx)
+    elseif !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
+        return mode_weight_ro_cal(ctx)
+    elseif !isempty(args["theta0-file"])
+        return mode_theta0(ctx)
+    else
+        return mode_plain(ctx)
+    end
+end
+
+"7.1: финальный прогон при best.theta, критерии, adaptive-final контроль."
+function final_forward(ctx, best)
+    args = ctx.args
+    data, wells, cfg, layout = ctx.data, ctx.wells, ctx.cfg, ctx.layout
+    obj, acfg, out_dir = ctx.obj, ctx.acfg, ctx.out_dir
     # финальный прогон и критерии
     if args["adaptive-search"]
         bnds = data.bounds
@@ -378,11 +422,17 @@ function main()
                 aJ, ainfo.J_T, ainfo.J_Ro, fmt_or_na(adaptive_rep.rmse_T),
                 fmt_or_na(adaptive_rep.rmse_Ro), fmt_or_na(100 * adaptive_rep.frac_2s_T))
     end
+    return (result = result, rep = rep, adaptive_rep = adaptive_rep)
+end
 
-    (obj.n_artifact_T[] > 0 || obj.n_artifact_Ro[] > 0) && @warn "Артефактные выборки в лучшем прогоне" n_artifact_T = obj.n_artifact_T[] n_artifact_Ro = obj.n_artifact_Ro[]
-
-    cache_save(obj; force = true)          # финальная запись кэша (2.2)
-
+"7.1: сборка solution.json из результатов режима."
+function build_solution(ctx, best, results, ff, c2f_info, cde)
+    args = ctx.args
+    nx, nz = ctx.nx, ctx.nz
+    wells = ctx.wells
+    layout, obj, rep = ctx.layout, ctx.obj, ff.rep
+    adaptive_rep = ff.adaptive_rep
+    c2f_stage, c2f_stages = c2f_info === nothing ? (nothing, C2fStage[]) : c2f_info
     solution = OrderedDict{String,Any}(
         "status" => "complete",
         "data_dir" => abspath(args["data-dir"]),
@@ -430,7 +480,7 @@ function main()
                 "frac_1s_Ro" => w.frac_1s_Ro, "frac_2s_Ro" => w.frac_2s_Ro,
                 "n_artifact" => w.n_artifact, "n_kept" => w.n_kept)
                 for w in rep.wells]),
-        "elapsed_total_s" => time() - t_start,
+        "elapsed_total_s" => time() - ctx.t_start,
     )
     if c2f_stage !== nothing
         cnx, cnz = parse.(Int, split(args["c2f-grid"], ","))
@@ -458,18 +508,48 @@ function main()
                 "frac_1s_Ro" => adaptive_rep.frac_1s_Ro, "frac_2s_Ro" => adaptive_rep.frac_2s_Ro,
                 "l2" => adaptive_rep.l2))
     end
-    open(joinpath(out_dir, "solution.json"), "w") do f
+    open(joinpath(ctx.out_dir, "solution.json"), "w") do f
         JSON.print(f, nan2null(solution), 2)
     end
-    # (NaN в критериях допустим только при отсутствии точек какого-то типа)
+    return solution
+end
 
+"7.1: итоговая печать в консоль."
+function print_summary(ctx, best, results, rep)
     println("ENSEMBLE J: ", join([round(r.J; digits = 1) for r in results], ", "))
     println("BEST θ̂: ", join([round(v; digits = 2) for v in best.theta], ", "))
     @printf("RMSE_T=%s RMSE_Ro=%s  T in 2σ: %s%%  Ro in 2σ: %s%%  E^L2=%s
 ",
             fmt_or_na(rep.rmse_T), fmt_or_na(rep.rmse_Ro), fmt_or_na(100 * rep.frac_2s_T),
             fmt_or_na(100 * rep.frac_2s_Ro), fmt_or_na(rep.l2))
-    println("SAVED ", out_dir)
+    println("SAVED ", ctx.out_dir)
+end
+
+function main()
+    args = parse_cli()
+    # 4.4: динамический бюджет полировки по умолчанию — не «тихое удешевление»,
+    # а ограничение сверху: NM обычно сходится раньше, лимит режет хвосты.
+    args["max-f-calls"] == -1 &&
+        (args["max-f-calls"] = 2 * args["nm-iterations"] * length(parse_epochs(args["epochs"])))
+    try
+        validate_flags(args)
+    catch err
+        println(stderr, "ОШИБКА КОНФИГУРАЦИИ: ", sprint(showerror, err))
+        exit(1)
+    end
+    ctx = setup_inverse(args)
+    out = run_mode(ctx)
+    best, results = out.best, out.results
+    c2f_info = haskey(out, :c2f_stage) ? (out.c2f_stage, out.c2f_stages) : nothing
+    cde = haskey(out, :cde) ? out.cde : 0
+    obj = ctx.obj
+    (obj.n_artifact_T[] > 0 || obj.n_artifact_Ro[] > 0) &&
+        @warn "Артефактные выборки в лучшем прогоне" n_artifact_T = obj.n_artifact_T[] n_artifact_Ro = obj.n_artifact_Ro[]
+    cache_save(obj; force = true)          # финальная запись кэша (2.2)
+    ff = final_forward(ctx, best)
+    build_solution(ctx, best, results, ff, c2f_info, cde)
+    print_summary(ctx, best, results, ff.rep)
+    return nothing
 end
 
 try
