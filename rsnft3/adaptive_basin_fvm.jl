@@ -463,15 +463,8 @@ function adaptive_step(transported::Vector{Float64}, mesh::AdaptiveMesh, state::
     ncell = length(mesh.cells)
     local_index = zeros(Int, ncell)
     local_index[active] = 1:count(active)
-    trial = copy(transported)
     pairs = mesh.pairs
-    last_linear_iterations = 0
-    last_linear_residual = Inf
-    max_change = Inf
-    picard_used = 0
-
-    for nonlinear_iteration in 1:config.picard_iterations
-        picard_used = nonlinear_iteration
+    assemble!(trial) = begin
         lam, rho_c, source = adaptive_properties(trial, grid, properties, config)
         diagonal = rho_c[active] .* mesh.area[active] ./ dt_seconds
         rhs = diagonal .* transported[active] .+ source[active] .* mesh.area[active]
@@ -514,21 +507,17 @@ function adaptive_step(transported::Vector{Float64}, mesh::AdaptiveMesh, state::
             end
         end
 
-        solution, last_linear_iterations, last_linear_residual = pcg_solve(
-            diagonal, pp, qq, gg, rhs, trial[active];
-            tolerance = config.linear_tolerance,
-            max_iterations = max(2000, 60 * floor(Int, sqrt(length(diagonal)))),
-        )
-        updated = fill(NaN, length(trial))
-        updated[active] = solution
-        max_change = -Inf                        # np.nanmax(np.abs(updated - trial))
-        for k in eachindex(updated)
-            d = abs(updated[k] - trial[k])
-            isnan(d) || (max_change = max(max_change, d))
-        end
-        trial = updated
-        max_change <= config.picard_tolerance_c && break
+        return diagonal, pp, qq, gg, rhs, trial[active]
     end
+    trial, picard_used, max_change, last_linear_iterations, last_linear_residual = picard_cycle(
+        config, transported, assemble!,
+        sol -> begin
+            u = fill(NaN, ncell)
+            u[active] = sol
+            return u
+        end;
+        linear_tolerance = config.linear_tolerance,
+        linear_max_iterations = max(2000, 60 * floor(Int, sqrt(sum(active)))))
 
     return trial, OrderedDict{String,Any}(
         "picard_iterations" => picard_used,

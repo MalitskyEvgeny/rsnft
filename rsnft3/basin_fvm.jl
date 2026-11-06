@@ -501,6 +501,37 @@ function thermal_properties!(lam::Matrix{Float64}, rho_c::Matrix{Float64},
     return lam, rho_c, source
 end
 
+"""7.2: общий Picard-цикл неявного шага FVM для регулярной и адаптивной сеток.
+assemble!(trial) -> (diagonal, pair_p, pair_q, pair_g, rhs, guess) — сборка системы
+для текущего trial (guess = начальное приближение PCG, trial[active]);
+scatter(sol) -> полное поле (NaN вне активной зоны). Поведение побитово совпадает
+с прежними встроенными циклами (double buffer, nanmax-изменение, break по tol)."""
+function picard_cycle(config, transported, assemble!, scatter;
+                      linear_tolerance::Float64, linear_max_iterations::Int)
+    trial = copy(transported)
+    updated = similar(transported)
+    max_change = Inf
+    linear_iterations = 0
+    linear_residual = Inf
+    picard_used = 0
+    for iteration in 1:config.picard_iterations
+        picard_used = iteration
+        diagonal, pair_p, pair_q, pair_g, rhs, guess = assemble!(trial)
+        solution, linear_iterations, linear_residual = pcg_solve(
+            diagonal, pair_p, pair_q, pair_g, rhs, guess;
+            tolerance = linear_tolerance, max_iterations = linear_max_iterations)
+        updated = scatter(solution)
+        max_change = -Inf
+        for k in eachindex(updated)
+            d = abs(updated[k] - trial[k])
+            isnan(d) || (max_change = max(max_change, d))
+        end
+        trial, updated = updated, trial
+        max_change <= config.picard_tolerance_c && break
+    end
+    return trial, picard_used, max_change, linear_iterations, linear_residual
+end
+
 function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::AbstractVector,
                            dx::Float64, dz::Float64, dt_seconds::Float64,
                            lith_properties::Dict{Int,LithProp}, config::SolverConfig;
@@ -512,15 +543,7 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
     indices = zeros(Int, nz, nx)
     indices[active] = 1:ncell
     lam = similar(transported_c); rho_c = similar(transported_c); source = similar(transported_c)
-    trial = copy(transported_c)
-    updated = similar(transported_c)
-    max_change = Inf
-    linear_iterations = 0
-    linear_residual = Inf
-    picard_used = 0
-
-    for iteration in 1:config.picard_iterations
-        picard_used = iteration
+    assemble!(trial) = begin
         thermal_properties!(lam, rho_c, source, trial, grid, lith_properties, config)
         volume = dx * dz
         diagonal = rho_c[active] .* volume ./ dt_seconds
@@ -564,21 +587,17 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
             end
         end
 
-        solution, linear_iterations, linear_residual = pcg_solve(
-            diagonal, pair_p, pair_q, pair_g, rhs, trial[active];
-            tolerance = config.pcg_tolerance,
-            max_iterations = max(2000, 8 * config.nx * config.nz),
-        )
-        fill!(updated, NaN)
-        updated[active] = solution
-        max_change = -Inf                      # np.nanmax(np.abs(updated - trial))
-        for k in eachindex(updated)
-            d = abs(updated[k] - trial[k])
-            isnan(d) || (max_change = max(max_change, d))
-        end
-        trial, updated = updated, trial        # double buffer, без копий
-        max_change <= config.picard_tolerance_c && break
+        return diagonal, pair_p, pair_q, pair_g, rhs, trial[active]
     end
+    trial, picard_used, max_change, linear_iterations, linear_residual = picard_cycle(
+        config, transported_c, assemble!,
+        sol -> begin
+            u = fill(NaN, nz, nx)
+            u[active] = sol
+            return u
+        end;
+        linear_tolerance = config.pcg_tolerance,
+        linear_max_iterations = max(2000, 8 * config.nx * config.nz))
 
     return trial, OrderedDict{String,Any}(
         "picard_iterations" => picard_used,
