@@ -38,6 +38,8 @@ param(
     [double]$SigmaT        = 2.0,
     [double]$SigmaRo       = 0.05,
     [double]$Reg           = 1.0,
+    [string]$NodeXs        = "",
+    [string]$Epochs        = "",
     [int]   $Seed          = 1,
     [string]$Theta0File    = "",
     [string]$Out           = "",
@@ -129,6 +131,8 @@ if (-not $Uniform) {
     $InverseArgs += @("--adaptive-final", "--adaptive-base", $AdaptiveBase,
                       "--adaptive-level", "$AdaptiveLevel")
 }
+if ($NodeXs) { $InverseArgs += @("--node-xs", $NodeXs) }
+if ($Epochs) { $InverseArgs += @("--epochs", $Epochs) }
 if ($Twin) { $InverseArgs += @("--q-true", $Q) }
 if ($Theta0File) { $InverseArgs += @("--theta0-file", $Theta0File) }
 & $JuliaExe @InverseArgs

@@ -60,6 +60,8 @@ NM_ITERATIONS=200
 SIGMA_T=2.0
 SIGMA_RO=0.05
 REG=1.0
+NODE_XS=""
+EPOCHS=""
 SEED=1
 THETA0=""
 OUT=""
@@ -106,6 +108,8 @@ while [[ $# -gt 0 ]]; do
         --sigma-T)       SIGMA_T="$2"; shift 2 ;;
         --sigma-Ro)      SIGMA_RO="$2"; shift 2 ;;
         --reg)           REG="$2"; shift 2 ;;
+        --node-xs)       NODE_XS="$2"; shift 2 ;;
+        --epochs)        EPOCHS="$2"; shift 2 ;;
         --seed)          SEED="$2"; shift 2 ;;
         --theta0-file)   THETA0="$2"; shift 2 ;;
         --out)           OUT="$2"; shift 2 ;;
@@ -171,6 +175,8 @@ if [[ $TWIN -eq 1 ]]; then
         --out "$TWIN_FILE"
     INVERSE_ARGS=(--data-dir "$INV_DATA_DIR" --wells "$TWIN_FILE" "${INVERSE_ARGS[@]:2}")
 fi
+[[ -n "$NODE_XS" ]] && INVERSE_ARGS+=(--node-xs "$NODE_XS")
+[[ -n "$EPOCHS" ]] && INVERSE_ARGS+=(--epochs "$EPOCHS")
 [[ $TWIN -eq 1 ]] && INVERSE_ARGS+=(--q-true "$TWIN_Q")
 [[ -n "$THETA0" ]] && INVERSE_ARGS+=(--theta0-file "$THETA0")
 
