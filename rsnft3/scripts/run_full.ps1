@@ -22,27 +22,38 @@ param(
     [switch]$Twin,
     [string]$Q             = "75,80,85,90",
     [int]   $TwinSeed      = 42,
-    [string]$Grid          = "20,40",
+    [string]$Grid          = "30,60",
     [string]$Base          = "16,32",
     [int]   $Level         = 2,
     [string]$AdaptiveBase  = "16,32",
     [int]   $AdaptiveLevel = 2,
     [switch]$Uniform,
-    [int]   $Nx            = 60,
-    [int]   $Nz            = 120,
-    [int]   $Ensemble      = 1,
-    [int]   $Workers       = 1,
+    [int]   $Nx            = 30,
+    [int]   $Nz            = 60,
+    [int]   $Ensemble      = 0,   # 0 = авто: по числу логических ядер
+    [int]   $Workers       = 0,   # 0 = авто: по числу ансамблей
     [int]   $DeBudget      = 2000,
-    [int]   $NmIterations  = 30,
+    [int]   $Threads       = 8,
+    [int]   $NmIterations  = 200,
     [double]$SigmaT        = 2.0,
     [double]$SigmaRo       = 0.05,
-    [double]$Reg           = 1.0,
+    [double]$Reg           = 0.3,
+    [string]$NodeXs        = "",
+    [string]$Epochs        = "",
     [int]   $Seed          = 1,
     [string]$Theta0File    = "",
     [string]$Out           = "",
     [switch]$Force,
     [switch]$OpenReport
 )
+
+# UTF-8 консоль (кириллица в логах без '?????')
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch { }
+
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -74,19 +85,22 @@ if (-not $Out) { $Out = Join-Path $RepoRoot "results\report_full_$TS" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 if ($Uniform) {
-    Write-Host "=== forward (uniform): $(Split-Path -Leaf $DataDir), grid ${Nx}x${Nz} ==="
+    Write-Host "=== Stage 1/3: forward solve (uniform): $(Split-Path -Leaf $DataDir), grid ${Nx}x${Nz} ==="
     $SolverScript = Join-Path $R3 "basin_fvm.jl"
     $SolverArgs = @("--data-dir", $DataDir, "--cache-dir", (Join-Path $RepoRoot "results"),
                     "--nx", "$Nx", "--nz", "$Nz")
 } else {
-    Write-Host "=== forward (adaptive): $(Split-Path -Leaf $DataDir), base $Base, level $Level ==="
+    Write-Host "=== Stage 1/3: forward solve (adaptive): $(Split-Path -Leaf $DataDir), base $Base, level $Level ==="
     $SolverScript = Join-Path $R3 "adaptive_basin_fvm.jl"
     $SolverArgs = @("--data-dir", $DataDir, "--cache-dir", (Join-Path $RepoRoot "results"),
                     "--base-nx", ($Base -split ',')[0], "--base-nz", ($Base -split ',')[1],
                     "--max-level", "$Level")
 }
 if ($Force) { $SolverArgs += "--force" }
-$SolverOut = & $JuliaExe "--project=$R3" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+# PS5: stderr native-processa pri 2>&1 stanovitsya ErrorRecord - EAP=Stop ubivaet skript
+$ErrorActionPreference = "Continue"
+$SolverOut = & $JuliaExe "--project=$R3" "-t" "$Threads" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+$ErrorActionPreference = "Stop"
 $RunLine = ($AllOut | Select-String -Pattern "^(RUN|CACHE_HIT)" | Select-Object -Last 1)
 if (-not $RunLine) { throw "solver did not report a run id" }
 $RunId = (($RunLine.ToString() -replace '[^\w\s]', ' ') -split '\s+' |
@@ -95,18 +109,18 @@ if (-not $RunId) { throw "could not parse run id from: $($RunLine.ToString())" }
 $RunDir = Join-Path $RepoRoot "results\$RunId"
 Write-Host "run dir: $RunDir"
 
-Write-Host "=== inverse ==="
+Write-Host "=== Stage 2/3: inversion ==="
 $WellsForInverse = $Wells
 if ($Twin) {
     $TwinFile = Join-Path $Out "twin_grid.json"
     Write-Host "--- twin: q=$Q, grid $Grid ---"
-    & $JuliaExe "--project=$R3" (Join-Path $R3 "make_twin.jl") `
+    & $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "make_twin.jl") `
         --data-dir $InvDataDir --wells ($Wells -split ';')[0] --grid $Grid --q $Q `
         --sigma-T $SigmaT --sigma-Ro $SigmaRo --seed $TwinSeed --out $TwinFile
     if ($LASTEXITCODE -ne 0) { throw "make_twin.jl failed" }
     $WellsForInverse = $TwinFile
 }
-$InverseArgs = @("--project=$R3", (Join-Path $R3 "run_inverse.jl"),
+$InverseArgs = @("--project=$R3", "-t", "$Threads", (Join-Path $R3 "run_inverse.jl"),
                  "--data-dir", $InvDataDir, "--wells", $WellsForInverse,
                  "--grid", $Grid, "--ensemble", "$Ensemble", "--workers", "$Workers",
                  "--de-budget", "$DeBudget", "--nm-iterations", "$NmIterations",
@@ -117,12 +131,15 @@ if (-not $Uniform) {
     $InverseArgs += @("--adaptive-final", "--adaptive-base", $AdaptiveBase,
                       "--adaptive-level", "$AdaptiveLevel")
 }
+if ($NodeXs) { $InverseArgs += @("--node-xs", $NodeXs) }
+if ($Epochs) { $InverseArgs += @("--epochs", $Epochs) }
+if ($Twin) { $InverseArgs += @("--q-true", $Q) }
 if ($Theta0File) { $InverseArgs += @("--theta0-file", $Theta0File) }
 & $JuliaExe @InverseArgs
 if ($LASTEXITCODE -ne 0) { throw "run_inverse.jl failed" }
 
-Write-Host "=== report ==="
-& $JuliaExe "--project=$R3" (Join-Path $R3 "report_full.jl") `
+Write-Host "=== Stage 3/3: report ==="
+& $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "report_full.jl") `
     --direct $RunDir --inverse (Join-Path $Out "inverse") --out (Join-Path $Out "report.html")
 if ($LASTEXITCODE -ne 0) { throw "report_full.jl failed" }
 

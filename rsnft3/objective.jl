@@ -11,9 +11,11 @@ include(joinpath(@__DIR__, "observations.jl"))
 # Адаптивный бэкенд (включает basin_fvm.jl — уже загружен, guard внутри)
 isdefined(@__MODULE__, :AdaptiveConfig) || include(joinpath(@__DIR__, "adaptive_basin_fvm.jl"))
 
-"Билинейная выборка поля field (nz, nx) на сетке (xg, zg) в точке (x, z)."
-function bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
-                         x::Float64, z::Float64)
+const BILINEAR_DEN_RATIO = 0.25
+
+"Билинейная выборка с флагом вырождения: возвращает (значение, degenerate)."
+function bilinear_sample_flagged(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
+                                 x::Float64, z::Float64)
     nx, nz = length(xg), length(zg)
     ux = (x - xg[1]) / (xg[2] - xg[1])
     uz = (z - zg[1]) / (zg[2] - zg[1])
@@ -23,13 +25,18 @@ function bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::Abstract
     v00 = field[j0, i0]; v10 = field[j0, i1]; v01 = field[j1, i0]; v11 = field[j1, i1]
     # Масочная интерполяция: неактивные (NaN) углы исключаются с перенормировкой
     # весов — точки у края сетки / тонкого осадочного клина не выпадают в NaN.
-    num = 0.0; den = 0.0
+    num = 0.0; den = 0.0; wtot = 0.0
     for (v, w) in ((v00, (1-tx)*(1-tz)), (v10, tx*(1-tz)), (v01, (1-tx)*tz), (v11, tx*tz))
+        wtot += w
         isfinite(v) || continue
         num += w * v; den += w
     end
-    den > 0.0 ? num / den : NaN
+    # Вырожденная перенормировка: если конечные углы несут малую долю полной
+    # суммы весов, линейная комбинация не представима — детерминированный NaN.
+    den < BILINEAR_DEN_RATIO * wtot ? (NaN, true) : (num / den, false)
 end
+bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
+                x::Float64, z::Float64) = bilinear_sample_flagged(xg, zg, field, x, z)[1]
 
 struct TTarget
     x::Float64
@@ -55,8 +62,12 @@ struct Objective
     t_targets::Vector{TTarget}
     ro_targets::Vector{RoTarget}
     n_dropped_T::Int                       # точки в неактивных ячейках сетки
+    n_artifact_T::Base.RefValue{Int}       # кумулятивно: артефактные выборки T
+    n_artifact_Ro::Base.RefValue{Int}      # кумулятивно: артефактные выборки Ro
     cache::Dict{String,Vector{Float64}}    # key -> [J, J_T, J_Ro, J_reg]
     cache_path::String                     # "" — только в памяти
+    ctx_hash::String                       # контекст задачи в ключе кэша (F4)
+    _dirty::Base.RefValue{Int}             # свежие оценки с последней записи кэша
     evals::Base.RefValue{Int}
     geometry::Any                          # ForwardGeometry | AdaptiveGeometry
     backend::Symbol                        # :regular | :adaptive
@@ -134,12 +145,22 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
     t_targets = TTarget[]
     n_dropped = 0
     gnx, gnz = size(active, 2), size(active, 1)
-    stencil_ok(x, z) = begin
-        fx = (x - xg[1]) / (xg[2] - xg[1]) + 0.5
-        fz = (z - zg[1]) / (zg[2] - zg[1]) + 0.5
-        i0 = clamp(floor(Int, fx), 1, gnx); i1 = clamp(i0 + 1, 1, gnx)
-        j0 = clamp(floor(Int, fz), 1, gnz); j1 = clamp(j0 + 1, 1, gnz)
-        active[j0, i0] && active[j0, i1] && active[j1, i0] && active[j1, i1]
+    # Дополнительно к активному стенсилу отсекаем вырожденные: если активные
+    # углы билинейного стенсила несут < BILINEAR_DEN_RATIO полной суммы весов,
+    # точка у тонкого клина не представима — исключаем на этапе маски (DE не
+    # видит «геометрию попаданий»). Веса считаются в конвенции bilinear_sample.
+    function stencil_ok(x, z)
+        nx, nz = gnx, gnz
+        ux = (x - xg[1]) / (xg[2] - xg[1])
+        uz = (z - zg[1]) / (zg[2] - zg[1])
+        i0 = clamp(floor(Int, ux) + 1, 1, nx); i1 = clamp(i0 + 1, 1, nx)
+        j0 = clamp(floor(Int, uz) + 1, 1, nz); j1 = clamp(j0 + 1, 1, nz)
+        tx = clamp(ux - (i0 - 1), 0.0, 1.0); tz = clamp(uz - (j0 - 1), 0.0, 1.0)
+        (active[j0, i0] && active[j0, i1] && active[j1, i0] && active[j1, i1]) || return false
+        w00 = (1-tx)*(1-tz); w10 = tx*(1-tz); w01 = (1-tx)*tz; w11 = tx*tz
+        den = (active[j0, i0] ? w00 : 0.0) + (active[j0, i1] ? w10 : 0.0) +
+              (active[j1, i0] ? w01 : 0.0) + (active[j1, i1] ? w11 : 0.0)
+        den >= BILINEAR_DEN_RATIO
     end
     for p in wells.points
         if p.kind === :T
@@ -153,7 +174,10 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
         le === nothing && continue
         push!(ro_targets, RoTarget(p.x, le[1], le[2], p.value, p.sigma))
     end
-    cache_path = isempty(cache_dir) ? "" : joinpath(cache_dir, "j_cache.json")
+    cache_path = isempty(cache_dir) ? "" : joinpath(cache_dir, "j_cache_v2.json")
+    if isempty(cache_dir) == false && isfile(joinpath(cache_dir, "j_cache.json"))
+        @warn "Найден старый j_cache.json — формат v1 без контекстного ключа, игнорируется (новый: j_cache_v2.json)"
+    end
     cache = Dict{String,Vector{Float64}}()
     if !isempty(cache_path) && isfile(cache_path)
         for (k, v) in JSON.parsefile(cache_path)
@@ -163,9 +187,29 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
         end
     end
     geometry = backend === :adaptive ? adaptive_geo : precompute_geometry(data, cfg)
+    # ctx_hash должен покрывать всё, что влияет на значение J (иначе кэш
+    # молча возвращает устаревшие J при смене sigma/допусков/таргетов):
+    targets_ctx = Any[
+        ["T", p.x, p.z, p.value, p.sigma] for p in t_targets] ∪
+        Any[["Ro", p.x, p.layer, p.eta, p.value, p.sigma] for p in ro_targets]
+    ctx = OrderedDict(
+        "version" => J_CACHE_VERSION, "input" => data.fingerprint,
+        "nx" => cfg.nx, "nz" => cfg.nz,
+        "max_dt_ma" => cfg.max_dt_ma,
+        "picard_iterations" => cfg.picard_iterations,
+        "picard_tolerance_c" => cfg.picard_tolerance_c,
+        "pcg_tolerance" => cfg.pcg_tolerance,
+        "epochs" => layout.epochs, "nodes_x" => layout.nodes_x,
+        "lower" => layout.lower, "upper" => layout.upper,
+        "reg" => reg, "weight_ro" => weight_ro,
+        "backend" => String(backend),
+        "adaptive_cfg" => backend === :adaptive ? adaptive_cfg : nothing,
+        "targets" => sort(targets_ctx; by = x -> (x[1], x[2], x[3])),
+        "n_T" => length(t_targets), "n_Ro" => length(ro_targets))
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
-                     t_targets, ro_targets, n_dropped, cache, cache_path, Ref(0),
-                     geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
+                     t_targets, ro_targets, n_dropped, Ref(0), Ref(0),
+                     cache, cache_path, bytes2hex(sha256(JSON.json(ctx)))[1:16], Ref(0),
+                     Ref(0), geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
 end
 
 "θ → qbasal (Вт/м²) на x-сетке прогона для каждого возраста; эквивалент
@@ -188,25 +232,37 @@ n_targets(obj::Objective, kind::Symbol) =
 "Вызов objective(θ) -> (J, info); сам Objective хранит кэш, счётчики и мишени."
 (obj::Objective)(θ::AbstractVector{<:Real}) = evaluate(obj, θ)
 
-cache_key(θ::AbstractVector{<:Real}) =
-    bytes2hex(sha256(join(string.(round.(Float64.(θ); digits = 10)), ",")))
+const J_CACHE_VERSION = 3
+
+"Ключ кэша: θ ⊕ контекст (данные, сетка, layout, reg, weight_ro, backend, версия) — F4."
+cache_key(θ::AbstractVector{<:Real}, ctx_hash::AbstractString = "") =
+    bytes2hex(sha256(join(string.(round.(Float64.(θ); digits = 10)), ",") * "|" * ctx_hash))[1:16]
 
 json_safe(v::Vector{Float64}) = Any[isfinite(x) ? x : nothing for x in v]
 
-function cache_save(obj::Objective)
+const CACHE_SAVE_EVERY = 64
+
+function cache_save(obj::Objective; force::Bool = false)
     isempty(obj.cache_path) && return
+    # 2.2: пишем раз в CACHE_SAVE_EVERY свежих оценок (или force) — не на каждой
+    force = force || obj._dirty[] >= CACHE_SAVE_EVERY
+    force || return
     mkpath(dirname(obj.cache_path))
-    open(obj.cache_path, "w") do f
+    tmp = obj.cache_path * ".tmp"
+    open(tmp, "w") do f
         JSON.print(f, OrderedDict(k => json_safe(v) for (k, v) in obj.cache))
     end
+    mv(tmp, obj.cache_path; force = true)      # атомарно на практике
+    obj._dirty[] = 0
 end
 
 "Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info)."
 function evaluate(obj::Objective, θ::AbstractVector{<:Real})
-    key = cache_key(θ)
+    key = cache_key(θ, obj.ctx_hash)
     if haskey(obj.cache, key)
         v = obj.cache[key]
         return v[1], (J_T = v[2], J_Ro = v[3], J_reg = v[4], cached = true,
+                      n_artifact_T = 0, n_artifact_Ro = 0,
                       evals = obj.evals[], t_seconds = 0.0)
     end
     t0 = time()
@@ -227,26 +283,38 @@ function evaluate(obj::Objective, θ::AbstractVector{<:Real})
     xg, zg = result.x, result.z
     temp0 = result.temperature_c[end, :, :]          # (nz, nx), t = 0
 
-    J_T = 0.0
+    J_T = 0.0; n_art_T = 0
     for t in obj.t_targets
-        v = bilinear_sample(xg, zg, temp0, t.x, t.z)
+        v, degenerate = bilinear_sample_flagged(xg, zg, temp0, t.x, t.z)
         w = t.sigma > 0 ? 1.0 / t.sigma^2 : 1.0
-        J_T += isfinite(v) ? w * (v - t.value)^2 : 1.0e6
+        if isfinite(v) && !degenerate
+            J_T += w * (v - t.value)^2
+        else
+            n_art_T += 1                    # артефакт: вклад 0, счётчик в info
+        end
     end
 
-    J_Ro = 0.0
+    J_Ro = 0.0; n_art_Ro = 0
     for t in obj.ro_targets
         rc = particle_ro(result, obj.data, t.x, t.layer, t.eta)
         w = t.sigma > 0 ? 1.0 / t.sigma^2 : 1.0
-        J_Ro += isfinite(rc) ? w * (rc - t.value)^2 : 1.0e6
+        if isfinite(rc)
+            J_Ro += w * (rc - t.value)^2
+        else
+            n_art_Ro += 1
+        end
     end
+    obj.n_artifact_T[] += n_art_T
+    obj.n_artifact_Ro[] += n_art_Ro
 
     d_node, d_epoch = theta_diffs(obj.layout, θ)
     J_reg = obj.reg * (sum(abs2, d_node) + sum(abs2, d_epoch))
 
     J = J_T + obj.weight_ro * J_Ro + J_reg
     obj.cache[key] = [J, J_T, J_Ro, J_reg]
+    obj._dirty[] += 1
     cache_save(obj)
     return J, (J_T = J_T, J_Ro = J_Ro, J_reg = J_reg, cached = false,
+               n_artifact_T = n_art_T, n_artifact_Ro = n_art_Ro,
                evals = obj.evals[], t_seconds = time() - t0)
 end

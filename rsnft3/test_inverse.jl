@@ -6,11 +6,20 @@ const TESTS = [
     ("param_data",   joinpath(@__DIR__, "test_param_data.jl")),
     ("objective",    joinpath(@__DIR__, "test_objective.jl")),
     ("criteria",     joinpath(@__DIR__, "test_criteria.jl")),
+    ("inverse_c2f",  joinpath(@__DIR__, "test_inverse_c2f.jl")),
+]
+# воркер-тесты (ансамбль, c2f-ансембль) требуют -p 2 — отдельной строкой
+const TESTS_P2 = [
+    ("inverse_c2f_p2", joinpath(@__DIR__, "test_inverse_c2f.jl")),
 ]
 const EXE = joinpath(Sys.BINDIR, Sys.iswindows() ? "julia.exe" : "julia")
 results = Tuple{String,Bool}[]
 for (name, path) in TESTS
     ok = success(run(`$EXE --project=$(@__DIR__) $path`; wait = true))
+    push!(results, (name, ok))
+end
+for (name, path) in TESTS_P2
+    ok = success(run(`$EXE --project=$(@__DIR__) -p 2 $path`; wait = true))
     push!(results, (name, ok))
 end
 println("\n=== SUMMARY ===")

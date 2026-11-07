@@ -8,8 +8,18 @@
 #   julia adaptive_basin_fvm.jl --data-dir data --cache-dir adaptive_results
 
 isdefined(@__MODULE__, :BasinDataset) || include(joinpath(@__DIR__, "basin_fvm.jl"))
+include(joinpath(@__DIR__, "config_check.jl"))
 
-const DEFAULT_DATA_DIR = raw"C:\Users\solo\Desktop\МЭИ\3 мага\роснефть\data1"
+include(joinpath(@__DIR__, "progress.jl"))
+using .Progress
+
+const DEFAULT_DATA_DIR = joinpath(@__DIR__, "..", "Данные для обратной задачи")
+"Фатально, если дефолтный каталог данных не найден (F8: вместо личного пути)."
+function default_data_dir_or_error()
+    isdir(DEFAULT_DATA_DIR) ||
+        throw(ErrorException("каталог данных по умолчанию не найден: $DEFAULT_DATA_DIR; укажите --data-dir явно"))
+    return DEFAULT_DATA_DIR
+end
 
 # ----------------------------------------------------------------------------
 # Конфигурация
@@ -23,7 +33,7 @@ Base.@kwdef struct AdaptiveConfig
     max_dt_ma::Float64 = 2.5
     picard_iterations::Int = 8
     picard_tolerance_c::Float64 = 1.0e-3
-    linear_tolerance::Float64 = 1.0e-8
+    linear_tolerance::Float64 = 1.0e-6
     fluid_lambda::Float64 = 0.60
     fluid_density::Float64 = 1000.0
     fluid_heat_capacity::Float64 = 4180.0
@@ -456,15 +466,8 @@ function adaptive_step(transported::Vector{Float64}, mesh::AdaptiveMesh, state::
     ncell = length(mesh.cells)
     local_index = zeros(Int, ncell)
     local_index[active] = 1:count(active)
-    trial = copy(transported)
     pairs = mesh.pairs
-    last_linear_iterations = 0
-    last_linear_residual = Inf
-    max_change = Inf
-    picard_used = 0
-
-    for nonlinear_iteration in 1:config.picard_iterations
-        picard_used = nonlinear_iteration
+    assemble!(trial) = begin
         lam, rho_c, source = adaptive_properties(trial, grid, properties, config)
         diagonal = rho_c[active] .* mesh.area[active] ./ dt_seconds
         rhs = diagonal .* transported[active] .+ source[active] .* mesh.area[active]
@@ -507,21 +510,17 @@ function adaptive_step(transported::Vector{Float64}, mesh::AdaptiveMesh, state::
             end
         end
 
-        solution, last_linear_iterations, last_linear_residual = pcg_solve(
-            diagonal, pp, qq, gg, rhs, trial[active];
-            tolerance = config.linear_tolerance,
-            max_iterations = max(2000, 60 * floor(Int, sqrt(length(diagonal)))),
-        )
-        updated = fill(NaN, length(trial))
-        updated[active] = solution
-        max_change = -Inf                        # np.nanmax(np.abs(updated - trial))
-        for k in eachindex(updated)
-            d = abs(updated[k] - trial[k])
-            isnan(d) || (max_change = max(max_change, d))
-        end
-        trial = updated
-        max_change <= config.picard_tolerance_c && break
+        return diagonal, pp, qq, gg, rhs, trial[active]
     end
+    trial, picard_used, max_change, last_linear_iterations, last_linear_residual = picard_cycle(
+        config, transported, assemble!,
+        sol -> begin
+            u = fill(NaN, ncell)
+            u[active] = sol
+            return u
+        end;
+        linear_tolerance = config.linear_tolerance,
+        linear_max_iterations = max(2000, 60 * floor(Int, sqrt(sum(active)))))
 
     return trial, OrderedDict{String,Any}(
         "picard_iterations" => picard_used,
@@ -633,6 +632,9 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
     start = time_ns()
 
     si_mesh = 0
+    total_steps = sum(max(1, Int(ceil((ages[k] - ages[k+1]) / config.max_dt_ma)))
+                      for k in 1:length(ages)-1)
+    Progress.bar_start(total_steps, "Adaptive forward time steps")
     for (older_age, younger_age) in zip(ages[1:end-1], ages[2:end])
         span = older_age - younger_age
         steps = max(1, Int(ceil(span / config.max_dt_ma)))
@@ -686,6 +688,8 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
                 "cells" => length(new_mesh.cells),
                 "active_cells" => count(new_grid.active),
             ), diag))
+            Progress.bar_add(1, @sprintf("Adaptive forward · age %.1f Ma · %d cells",
+                                         new_state.age, length(new_mesh.cells)))
             mesh, state, grid = new_mesh, new_state, new_grid
             previous_fraction = geometry === nothing ? fraction : sg.fraction
         end
@@ -693,6 +697,7 @@ function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
         push!(saved, preview)
         push!(cell_counts, length(mesh.cells))
     end
+    Progress.bar_finish()
 
     elapsed = (time_ns() - start) / 1.0e9
     final_lith = mesh_to_regular(mesh, Float64.(grid.lith), config.preview_nx, config.preview_nz)[3]
@@ -765,6 +770,27 @@ function colour_map_rgb(values::AbstractVector{Float64}, low::Float64, high::Flo
                   round(Int, a[3] * (1 - w) + b[3] * w))
     end
     return out
+end
+
+const MESH_PNG_MODE = Ref{String}("changed")
+
+"6.2: mesh.png по режиму --mesh-png (always|changed|never, дефолт changed).
+changed: рисуем только если хэш геометрии сетки изменился с прошлого прогона."
+function mesh_png_maybe(mesh::AdaptiveMesh, grid::CellGrid, temperature_c::Vector{Float64},
+                        run_dir::AbstractString)
+    mode = MESH_PNG_MODE[]
+    mode in ("always", "changed", "never") ||
+        error("--mesh-png: допустимы always | changed | never, получено: $mode")
+    mode == "never" && return nothing
+    mark = joinpath(run_dir, "mesh.hash")
+    geo_hash = bytes2hex(sha256(string(length(mesh.cells), mesh.bounds)))[1:16]
+    if mode == "changed" && isfile(mark) && strip(read(mark, String)) == geo_hash
+        println("MESH_PNG skipped (mesh unchanged, hash $geo_hash)")
+        return nothing
+    end
+    path = save_mesh_drawing(mesh, grid, temperature_c, joinpath(run_dir, "mesh.png"))
+    open(mark, "w") do f; print(f, geo_hash); end
+    return path
 end
 
 function save_mesh_drawing(mesh::AdaptiveMesh, grid::CellGrid, temperature_c::Vector{Float64},
@@ -910,12 +936,17 @@ end
 # ----------------------------------------------------------------------------
 
 function main_adaptive(argv = ARGS)
+    Progress.init()
     d = AdaptiveConfig()
     s = ArgParseSettings(description = "Adaptive quadtree FVM basin solver")
     @add_arg_table! s begin
+        "--mesh-png"
+            arg_type = String
+            default = "changed"
+            help = "mesh.png mode: always | changed (skip if mesh hash matches) | never"
         "--data-dir"
             arg_type = String
-            default = DEFAULT_DATA_DIR
+            default = default_data_dir_or_error()
         "--cache-dir"
             arg_type = String
             default = "adaptive_results"
@@ -948,6 +979,7 @@ function main_adaptive(argv = ARGS)
             action = :store_true
     end
     args = parse_args(argv, s)
+    MESH_PNG_MODE[] = args["mesh-png"]
 
     config = AdaptiveConfig(
         base_nx = args["base-nx"], base_nz = args["base-nz"], max_level = args["max-level"],
@@ -959,6 +991,7 @@ function main_adaptive(argv = ARGS)
     validate(config)
     cache_dir = args["cache-dir"]
     mkpath(cache_dir)
+    validate_inputs(args["data-dir"], "", cache_dir)
     data = load_dataset(args["data-dir"], cache_dir)
     run_id = adaptive_run_id(data, config)
     run_dir = joinpath(cache_dir, run_id)
@@ -991,12 +1024,18 @@ function main_adaptive(argv = ARGS)
     save_adaptive(result, run_dir, metadata)
     update_manifest(cache_dir, metadata)
     println("SAVED $(joinpath(run_dir, "result.npz"))")
-    mesh_path = save_mesh_drawing(mesh, result.grid, result.final_temperature_cells,
-                                  joinpath(run_dir, "mesh.png"))
-    println(@sprintf("MESH_PNG %s", mesh_path))
+    mesh_path = mesh_png_maybe(mesh, result.grid, result.final_temperature_cells,
+                               run_dir)
+    mesh_path !== nothing && println(@sprintf("MESH_PNG %s", mesh_path))
     println(@sprintf("CELLS %d ACTIVE %d MIN_CELL %.3fx%.3f m",
                      length(mesh.cells), final_active, metadata["minimum_dx_m"], metadata["minimum_dz_m"]))
     println(@sprintf("T_FINAL %.3f %.3f C", minimum(finite), maximum(finite)))
+    nsteps = length(result.diagnostics)
+    @printf("TIME total %s | forward %s | %d steps, %.2f s/step
+",
+            Progress.fmt_time_public(result.elapsed_seconds),
+            Progress.fmt_time_public(result.elapsed_seconds), nsteps,
+            result.elapsed_seconds / max(nsteps, 1))
     unconverged_steps > 0 && println("WARNING NONLINEAR_NOT_CONVERGED $unconverged_steps time steps")
 end
 

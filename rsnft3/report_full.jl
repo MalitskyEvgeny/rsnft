@@ -32,6 +32,9 @@ function parse_cli(argv = ARGS)
             help = "путь к итоговому HTML (по умолчанию <run_dir>/report.html)"
             arg_type = String
             default = ""
+        "--slim"
+            help = "plotly.js из соседнего results/assets/plotly.min.js вместо встраивания"
+            action = :store_true
     end
     return parse_args(argv, s)
 end
@@ -113,11 +116,15 @@ if has_inverse()
 end
 
 function main()
+    REPORT_SLIM[] = CLI_ARGS["slim"]
     out_path = CLI_ARGS["out"]
     if isempty(out_path)
         base = !isempty(DIRECT_DIR) ? DIRECT_DIR : INVERSE_DIR
         out_path = joinpath(base, "report.html")
     end
+    isempty(DIRECT_DIR) || isdir(DIRECT_DIR) || error("каталог прямой задачи не найден: $DIRECT_DIR")
+    isempty(INVERSE_DIR) || isdir(INVERSE_DIR) || error("каталог обратной задачи не найден: $INVERSE_DIR")
+    REPORT_OUT_PATH[] = out_path
     html = build_report(DIRECT_DIR, INVERSE_DIR, out_path)
     mkpath(dirname(abspath(out_path)))
     write(out_path, html)

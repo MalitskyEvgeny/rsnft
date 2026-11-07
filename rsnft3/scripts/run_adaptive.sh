@@ -21,10 +21,10 @@ ADAPTIVE_LEVEL=2
 ADAPTIVE_PREVIEW="120,160"
 THETA0_FILE=""
 THREADS=8
-ENSEMBLE=1
+ENSEMBLE=3
 WORKERS=1
-DE_BUDGET=2000
-NM_ITERATIONS=30
+DE_BUDGET=4000
+NM_ITERATIONS=200
 REG=1.0
 SEED=1
 SIGMA_T=2.0
@@ -99,7 +99,7 @@ FROZEN_FLAG=()
 THETA0_FLAG=()
 [[ -n "$THETA0_FILE" ]] && THETA0_FLAG=(--theta0-file "$(cd "$(dirname "$THETA0_FILE")" && pwd)/$(basename "$THETA0_FILE")")
 
-echo "=== run_inverse ($MODE) ==="
+echo "=== Stage 1/2: inversion ($MODE) ==="
 echo "out=$OUT_DIR  grid=$GRID  adaptive base=$ADAPTIVE_BASE level=$ADAPTIVE_LEVEL preview=$ADAPTIVE_PREVIEW"
 T0=$SECONDS
 
@@ -125,7 +125,7 @@ SOLUTION="$OUT_DIR/solution.json"
 
 if [[ "$NO_REPORT" == 0 ]]; then
     echo ""
-    echo "=== report ==="
+    echo "=== Stage 2/2: report ==="
     julia --project="$R3" "$R3/report_full.jl" --inverse "$OUT_DIR" \
         || echo "report_full.jl failed; continuing" >&2
 fi

@@ -24,8 +24,13 @@ v = bilinear_sample(xg, zg, field, 25.0, 250.0)
 check("bilinear: linear field reproduced exactly", abs(v - (2 * 25 + 0.1 * 250)) < 1e-9)
 v2 = bilinear_sample(xg, zg, field, 27.5, 275.0)
 check("bilinear: interpolation between nodes", abs(v2 - (2 * 27.5 + 0.1 * 275)) < 1e-9)
+# Масочная интерполяция (c5fc0a4): NaN-углы исключаются с перенормировкой весов.
 field_nan = copy(field); field_nan[6, 3] = NaN   # ячейка стенсила (25, 250)
-check("bilinear: NaN stencil -> NaN", isnan(bilinear_sample(xg, zg, field_nan, 25.0, 250.0)))
+check("bilinear: one NaN corner -> finite (renormalized)",
+      isfinite(bilinear_sample(xg, zg, field_nan, 25.0, 250.0)))
+field_nan[5:7, 2:4] .= NaN                       # весь стенсил (25, 250) неактивен
+check("bilinear: all-NaN stencil -> NaN",
+      isnan(bilinear_sample(xg, zg, field_nan, 25.0, 250.0)))
 
 # --- 2. make_objective на реальных данных (сетка 50x60) ---
 const DATA = normpath(joinpath(@__DIR__, "..", "Данные для обратной задачи"))
@@ -42,8 +47,8 @@ cachedir = joinpath(tempdir(), "b3_cache_test")
 rm(cachedir; force = true, recursive = true)
 Jfun = make_objective(d, wells, cfg, lay; reg = 0.1, weight_ro = 1.0, cache_dir = cachedir)
 
-check("T targets: 487 (499 − 12 в неактивных ячейках)", n_targets(Jfun, :T) == 487)
-check("dropped T points == 12", Jfun.n_dropped_T == 12)
+check("T targets: 491 (499 − 8 вырожденных стенсилов, конвенция 73810e4)", n_targets(Jfun, :T) == 491)
+check("dropped T points == 8", Jfun.n_dropped_T == 8)
 check("Ro targets: 49", n_targets(Jfun, :Ro) == 49)
 
 θt = theta_constant(lay, [75.0, 80.0, 85.0, 90.0])
@@ -52,7 +57,8 @@ check("J finite and positive", isfinite(J1) && J1 > 0)
 check("info breakdown consistent", abs(info1.J_T + Jfun.weight_ro * info1.J_Ro + info1.J_reg - J1) < 1e-6 * J1)
 J2, info2 = Jfun(θt)
 check("cache: second call cached", info2.cached && J2 == J1)
-check("cache JSON dumped", isfile(joinpath(cachedir, "j_cache.json")))
+cache_save(Jfun; force = true)          # ad30568: дамп раз в 64 оценки, форсим вручную
+check("cache JSON dumped", isfile(joinpath(cachedir, "j_cache_v2.json")))
 check("evals counted once", info2.evals == 1)
 
 # регуляризация: грубый θ (пила по эпохам) — больший J_reg

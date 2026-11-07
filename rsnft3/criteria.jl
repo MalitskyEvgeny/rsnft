@@ -14,6 +14,9 @@ struct WellStat
     frac_2s_T::Float64
     frac_1s_Ro::Float64
     frac_2s_Ro::Float64
+    n_artifact::Int                       # NaN-невязки (артефактные выборки)
+    n_kept::Int                           # конечные невязки (T+Ro)
+    n_dropped::Int                        # = n_artifact, для читаемости отчёта
 end
 
 struct CriteriaReport
@@ -25,10 +28,18 @@ struct CriteriaReport
     frac_1s_Ro::Float64
     frac_2s_Ro::Float64
     l2::Float64                         # E^L2 к reference-прогону (NaN если нет)
+    n_artifact::Int                     # артефактные точки всего
+    n_kept::Int
+    n_dropped::Int
+    passed::Bool                        # строгая приёмка (см. criteria_report)
 end
 
-frac_within(res::Vector{Float64}, sigma::Float64, k::Real) =
-    (isempty(res) || sigma <= 0) ? NaN : count(r -> abs(r) <= k * sigma, res) / length(res)
+"Доля |res| <= k·σ по парам (невязка, σ точки); σ <= 0 -> NaN (n/a в отчёте)."
+frac_within(pairs::Vector{Tuple{Float64,Float64}}, k::Real) =
+    isempty(pairs) ? NaN :
+    let fin = [x for x in pairs if isfinite(x[1]) && x[2] > 0]
+        isempty(fin) ? NaN : count(x -> abs(x[1]) <= k * x[2], fin) / length(pairs)
+    end
 
 rmse(res::Vector{Float64}) = isempty(res) ? NaN : sqrt(sum(abs2, res) / length(res))
 
@@ -60,16 +71,15 @@ function residuals_Ro(result, data::BasinDataset, wells::WellSet)
 end
 
 function _stat(name::String, t::Vector{Tuple{Float64,Float64}}, r::Vector{Tuple{Float64,Float64}})
-    keepT = [x for x in t if isfinite(x[1])]
-    keepR = [x for x in r if isfinite(x[1])]
-    resT = first.(keepT); sigT = last.(keepT)
-    resR = first.(keepR); sigR = last.(keepR)
+    resT = first.([x for x in t if isfinite(x[1])])
+    resR = first.([x for x in r if isfinite(x[1])])
+    n_art = count(x -> !isfinite(x[1]), t) + count(x -> !isfinite(x[1]), r)
+    n_kept = length(resT) + length(resR)
     return WellStat(name, length(resT), length(resR),
                     rmse(resT), rmse(resR),
-                    frac_within(resT, isempty(sigT) ? 1.0 : sigT[1], 1),
-                    frac_within(resT, isempty(sigT) ? 1.0 : sigT[1], 2),
-                    frac_within(resR, isempty(sigR) ? 1.0 : sigR[1], 1),
-                    frac_within(resR, isempty(sigR) ? 1.0 : sigR[1], 2))
+                    frac_within(t, 1), frac_within(t, 2),
+                    frac_within(r, 1), frac_within(r, 2),
+                    n_art, n_kept, n_art)
 end
 
 """
@@ -87,16 +97,22 @@ function criteria_report(result_calc, data::BasinDataset, wells::WellSet;
         push!(stats, _stat(wname, get(resT, wname, Tuple{Float64,Float64}[]),
                            get(resR, wname, Tuple{Float64,Float64}[])))
     end
-    allT = [x for x in vcat(values(resT)...) if isfinite(x[1])]
-    allR = [x for x in vcat(values(resR)...) if isfinite(x[1])]
+    allT = vcat(values(resT)...)
+    allR = vcat(values(resR)...)
+    finT = first.([x for x in allT if isfinite(x[1])])
+    finR = first.([x for x in allR if isfinite(x[1])])
     l2 = result_ref === nothing ? NaN : l2_error(result_calc, result_ref)
+    n_art = count(x -> !isfinite(x[1]), allT) + count(x -> !isfinite(x[1]), allR)
+    n_kept = length(finT) + length(finR)
+    # Строгая приёмка: без артефактов; RMSE <= 2σ_max; доля в 2σ >= 95% (где σ > 0).
+    passed = n_art == 0 &&
+             (isempty(allT) || isnan(frac_within(allT, 2)) || frac_within(allT, 2) >= 0.95) &&
+             (isempty(allR) || isnan(frac_within(allR, 2)) || frac_within(allR, 2) >= 0.95)
     return CriteriaReport(stats,
-                          rmse(first.(allT)), rmse(first.(allR)),
-                          frac_within(first.(allT), length(allT) > 0 ? allT[1][2] : 1.0, 1),
-                          frac_within(first.(allT), length(allT) > 0 ? allT[1][2] : 1.0, 2),
-                          frac_within(first.(allR), length(allR) > 0 ? allR[1][2] : 1.0, 1),
-                          frac_within(first.(allR), length(allR) > 0 ? allR[1][2] : 1.0, 2),
-                          l2)
+                          rmse(finT), rmse(finR),
+                          frac_within(allT, 1), frac_within(allT, 2),
+                          frac_within(allR, 1), frac_within(allR, 2),
+                          l2, n_art, n_kept, n_art, passed)
 end
 
 """

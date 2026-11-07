@@ -17,15 +17,20 @@ using ArgParse
 using DataFrames
 using JSON
 using LinearAlgebra
+using SparseArrays
 using NPZ
 using OrderedCollections
 using Printf
 using Serialization
 using SHA
 using Statistics
+
+include(joinpath(@__DIR__, "progress.jl"))
+using .Progress
 using XLSX
 
 const SECONDS_PER_MA = 1.0e6 * 365.25 * 24.0 * 3600.0
+
 
 # ----------------------------------------------------------------------------
 # Конфигурация
@@ -41,7 +46,8 @@ Base.@kwdef struct SolverConfig
     fluid_density::Float64 = 1000.0
     fluid_heat_capacity::Float64 = 4180.0
     initial_lambda::Float64 = 2.5
-    pcg_tolerance::Float64 = 1.0e-8
+    pcg_tolerance::Float64 = 1.0e-6
+    linear_solver::Symbol = :pcg
 end
 
 function validate(c::SolverConfig)
@@ -49,6 +55,8 @@ function validate(c::SolverConfig)
     c.max_dt_ma <= 0 && throw(ArgumentError("max_dt_ma must be positive"))
     c.picard_iterations < 1 && throw(ArgumentError("picard_iterations must be positive"))
     c.pcg_tolerance <= 0 && throw(ArgumentError("pcg_tolerance must be positive"))
+    c.linear_solver in (:pcg, :direct) ||
+        throw(ArgumentError("linear_solver must be :pcg or :direct"))
     return nothing
 end
 
@@ -93,45 +101,75 @@ end
 
 harmonic(a, b) = 2.0 * a * b / max(a + b, 1.0e-30)
 
-"Jacobi-preconditioned conjugate gradients for an FVM graph matrix."
-function pcg_solve(diagonal::Vector{Float64}, pair_p::Vector{Int}, pair_q::Vector{Int},
-                   conductance::Vector{Float64}, rhs::Vector{Float64}, initial::Vector{Float64};
-                   tolerance::Float64 = 1.0e-9, max_iterations::Int = 1000)
-    buf = similar(diagonal)
-    function matvec(v::Vector{Float64})
-        result = buf
-        result .= diagonal .* v
-        @inbounds for k in eachindex(pair_p)
-            p = pair_p[k]; q = pair_q[k]; g = conductance[k]
-            result[p] -= g * v[q]
-            result[q] -= g * v[p]
-        end
-        return result
+"Jacobi-preconditioned conjugate gradients for an FVM graph matrix (preallocated buffers)."
+function pcg_solve!(solution::Vector{Float64}, residual::Vector{Float64},
+                    z::Vector{Float64}, direction::Vector{Float64}, applied::Vector{Float64},
+                    diagonal::Vector{Float64}, pair_p::Vector{Int}, pair_q::Vector{Int},
+                    conductance::Vector{Float64}, rhs::Vector{Float64}, initial::Vector{Float64};
+                    tolerance::Float64 = 1.0e-9, max_iterations::Int = 1000)
+    n = length(diagonal)
+    copyto!(solution, initial)
+    @inbounds @simd for i in 1:n
+        residual[i] = diagonal[i] * solution[i]
     end
-
-    solution = copy(initial)
-    residual = rhs - matvec(solution)
+    @inbounds for k in eachindex(pair_p)
+        p = pair_p[k]; q = pair_q[k]; g = conductance[k]
+        residual[p] -= g * solution[q]
+        residual[q] -= g * solution[p]
+    end
+    @inbounds @simd for i in 1:n
+        residual[i] = rhs[i] - residual[i]
+    end
     scale = max(norm(rhs), 1.0)
     relative = norm(residual) / scale
-    relative <= tolerance && return solution, 0, relative
-    z = residual ./ diagonal
-    direction = copy(z)
+    relative <= tolerance && return 0, relative
+    @inbounds @simd for i in 1:n
+        z[i] = residual[i] / diagonal[i]
+    end
+    copyto!(direction, z)
     rz_old = dot(residual, z)
     for iteration in 1:max_iterations
-        applied = matvec(direction)
+        @inbounds @simd for i in 1:n
+            applied[i] = diagonal[i] * direction[i]
+        end
+        @inbounds for k in eachindex(pair_p)
+            p = pair_p[k]; q = pair_q[k]; g = conductance[k]
+            applied[p] -= g * direction[q]
+            applied[q] -= g * direction[p]
+        end
         denominator = dot(direction, applied)
         denominator <= 0.0 && error("PCG lost positive definiteness")
         alpha = rz_old / denominator
-        solution .+= alpha .* direction
-        residual .-= alpha .* applied
+        @inbounds @simd for i in 1:n
+            solution[i] += alpha * direction[i]
+            residual[i] -= alpha * applied[i]
+        end
         relative = norm(residual) / scale
-        relative <= tolerance && return solution, iteration, relative
-        z = residual ./ diagonal
+        relative <= tolerance && return iteration, relative
+        @inbounds @simd for i in 1:n
+            z[i] = residual[i] / diagonal[i]
+        end
         rz_new = dot(residual, z)
-        direction = z .+ (rz_new / rz_old) .* direction
+        beta = rz_new / rz_old
+        @inbounds @simd for i in 1:n
+            direction[i] = z[i] + beta * direction[i]
+        end
         rz_old = rz_new
     end
     error(@sprintf("PCG did not converge in %d iterations (residual=%.3e)", max_iterations, relative))
+end
+
+function pcg_solve(diagonal::Vector{Float64}, pair_p::Vector{Int}, pair_q::Vector{Int},
+                   conductance::Vector{Float64}, rhs::Vector{Float64}, initial::Vector{Float64};
+                   tolerance::Float64 = 1.0e-9, max_iterations::Int = 1000)
+    n = length(diagonal)
+    solution = Vector{Float64}(undef, n)
+    iterations, relative = pcg_solve!(solution, Vector{Float64}(undef, n),
+                                      Vector{Float64}(undef, n), Vector{Float64}(undef, n),
+                                      Vector{Float64}(undef, n),
+                                      diagonal, pair_p, pair_q, conductance, rhs, initial;
+                                      tolerance = tolerance, max_iterations = max_iterations)
+    return solution, iterations, relative
 end
 
 # ----------------------------------------------------------------------------
@@ -154,6 +192,32 @@ struct LithProp
     c20::Float64
     As::Float64
 end
+"Предвычисленные массивы свойств литологий (code -> scalar)."
+struct LithoPropLookup
+    codes::Vector{Int}
+    lambda20::Vector{Float64}
+    c20::Vector{Float64}
+    rho_s::Vector{Float64}
+    As::Vector{Float64}
+    by_code::Dict{Int,Int}   # code -> index
+end
+
+function LithoPropLookup(props::Dict{Int,LithProp})
+    codes = collect(keys(props))
+    lambda20 = Float64[props[c].lambda20 for c in codes]
+    c20      = Float64[props[c].c20      for c in codes]
+    rho_s    = Float64[props[c].rho_s    for c in codes]
+    As       = Float64[props[c].As       for c in codes]
+    by_code = Dict{Int,Int}(c => i for (i, c) in enumerate(codes))
+    return LithoPropLookup(codes, lambda20, c20, rho_s, As, by_code)
+end
+
+@inline function lookup_index(l::LithoPropLookup, code::Int)
+    idx = get(l.by_code, code, 0)
+    idx == 0 && throw(KeyError("Unknown lithotype code $code; available: $(sort(l.codes))"))
+    return idx
+end
+
 
 struct Layer
     top::Vector{Float64}
@@ -177,6 +241,175 @@ struct Grid
     lith::Matrix{Int}
     phi::Matrix{Float64}
     names::Vector{String}
+end
+
+"Построенный один раз на (grid, state) стенсил FVM: компактные индексы, пары ячеек,
+геометрия граней, граничные ячеи. Не зависит от температуры и qbasal (кроме
+значений tsurf, зафиксированных при построении)."
+struct Stencil
+    ncell::Int
+    cell_lin::Vector{Int}
+    cell_col::Vector{Int}
+    cell_tsurf::Vector{Float64}
+    pair_first::Vector{Int}
+    pair_last::Vector{Int}
+    pair_p::Vector{Int}
+    pair_q::Vector{Int}
+    pair_plin::Vector{Int}
+    pair_qlin::Vector{Int}
+    pair_area::Vector{Float64}
+    pair_dist::Vector{Float64}
+    pair_g::Vector{Float64}
+    btop::Vector{Int8}
+    bbot::Vector{Int8}
+    east_k::Vector{Int}
+    north_k::Vector{Int}
+    west_k::Vector{Int}
+    south_k::Vector{Int}
+    idx_west::Vector{Int}
+    idx_south::Vector{Int}
+    idx_north::Vector{Int}
+    idx_east::Vector{Int}
+    idx_diag::Vector{Int}
+    colptr::Vector{Int}
+    rowval::Vector{Int}
+    dx::Float64
+    dz::Float64
+end
+
+"Кеш символических факторизаций CHOLMOD по объекту стенсила (паттерн матрицы
+фиксирован для данного стенсила; численная факторизация обновляется cholesky!)."
+const CHOLMOD_FACTOR_CACHE = Base.IdDict{Stencil, Any}()
+
+"Переиспользуемое рабочее пространство шага: свойства, диагональ, правая часть,
+буферы PCG и double-buffer полей температуры (NaN в неактивных ячейках)."
+mutable struct FvmWorkspace
+    nz::Int
+    nx::Int
+    ncell::Int
+    lam::Matrix{Float64}
+    rho_c::Matrix{Float64}
+    source::Matrix{Float64}
+    diag::Vector{Float64}
+    rhs::Vector{Float64}
+    sol::Vector{Float64}
+    residual::Vector{Float64}
+    zvec::Vector{Float64}
+    direction::Vector{Float64}
+    applied::Vector{Float64}
+    field_a::Matrix{Float64}
+    field_b::Matrix{Float64}
+end
+
+function FvmWorkspace(nz::Int, nx::Int)
+    ncell = nz * nx
+    return FvmWorkspace(nz, nx, ncell,
+        fill(NaN, nz, nx), fill(NaN, nz, nx), fill(NaN, nz, nx),
+        Vector{Float64}(undef, ncell), Vector{Float64}(undef, ncell),
+        Vector{Float64}(undef, ncell), Vector{Float64}(undef, ncell),
+        Vector{Float64}(undef, ncell), Vector{Float64}(undef, ncell),
+        Vector{Float64}(undef, ncell),
+        fill(NaN, nz, nx), fill(NaN, nz, nx))
+end
+
+function build_stencil(grid::Grid, state::State, z::AbstractVector, dx::Float64, dz::Float64)
+    active = grid.active
+    nz, nx = size(active)
+    ncell = count(active)
+    cell_lin = Vector{Int}(undef, ncell)
+    cell_col = Vector{Int}(undef, ncell)
+    cell_tsurf = Vector{Float64}(undef, ncell)
+    pair_first = Vector{Int}(undef, ncell)
+    pair_last = Vector{Int}(undef, ncell)
+    btop = Vector{Int8}(undef, ncell)
+    bbot = Vector{Int8}(undef, ncell)
+    index = zeros(Int, nz, nx)
+    pos = 0
+    for i in 1:nx, j in 1:nz
+        active[j, i] || continue
+        pos += 1
+        index[j, i] = pos
+        cell_lin[pos] = j + (i - 1) * nz
+        cell_col[pos] = i
+        cell_tsurf[pos] = state.tsurf[i]
+    end
+    pair_p = Int[]; pair_q = Int[]
+    pair_plin = Int[]; pair_qlin = Int[]
+    pair_area = Float64[]; pair_dist = Float64[]
+    sizehint!(pair_p, 2 * ncell); sizehint!(pair_q, 2 * ncell)
+    sizehint!(pair_plin, 2 * ncell); sizehint!(pair_qlin, 2 * ncell)
+    sizehint!(pair_area, 2 * ncell); sizehint!(pair_dist, 2 * ncell)
+    for i in 1:nx, j in 1:nz
+        active[j, i] || continue
+        p = index[j, i]
+        lin = j + (i - 1) * nz
+        pair_first[p] = length(pair_p) + 1
+
+        for (dj, di, area, distance) in ((0, 1, dz, dx), (1, 0, dx, dz))
+            jj, ii = j + dj, i + di
+            if 1 <= jj <= nz && 1 <= ii <= nx && active[jj, ii]
+                push!(pair_p, p); push!(pair_q, index[jj, ii])
+                push!(pair_plin, lin); push!(pair_qlin, jj + (ii - 1) * nz)
+                push!(pair_area, area); push!(pair_dist, distance)
+            end
+        end
+        pair_last[p] = length(pair_p)
+
+        btop[p] = 0; bbot[p] = 0
+        for dj in (-1, 1)
+            jj = j + dj
+            (1 <= jj <= nz && active[jj, i]) && continue
+            face_z = z[j] + 0.5 * dj * dz
+            kind = abs(face_z - state.surface[i]) <= abs(face_z - state.base[i]) ? Int8(1) : Int8(2)
+            dj == -1 ? (btop[p] = kind) : (bbot[p] = kind)
+        end
+    end
+    east_k = zeros(Int, ncell); north_k = zeros(Int, ncell)
+    west_k = zeros(Int, ncell); south_k = zeros(Int, ncell)
+    @inbounds for k in eachindex(pair_p)
+        p = pair_p[k]; q = pair_q[k]
+        if q == p + 1
+            north_k[p] = k; south_k[q] = k
+        else
+            east_k[p] = k; west_k[q] = k
+        end
+    end
+    # CSC-паттерн: в столбце c — соседи снизу (запад, юг), диагональ, соседи сверху (север, восток).
+    colptr = Vector{Int}(undef, ncell + 1)
+    colptr[1] = 1
+    @inbounds for c in 1:ncell
+        colptr[c + 1] = colptr[c] + (west_k[c] > 0) + (south_k[c] > 0) + 1 +
+                        (north_k[c] > 0) + (east_k[c] > 0)
+    end
+    nnz = colptr[end] - 1
+    rowval = Vector{Int}(undef, nnz)
+    idx_west = zeros(Int, ncell); idx_south = zeros(Int, ncell)
+    idx_north = zeros(Int, ncell); idx_east = zeros(Int, ncell)
+    idx_diag = zeros(Int, ncell)
+    @inbounds for c in 1:ncell
+        pos = colptr[c]
+        if west_k[c] > 0
+            idx_west[c] = pos; rowval[pos] = pair_p[west_k[c]]; pos += 1
+        end
+        if south_k[c] > 0
+            idx_south[c] = pos; rowval[pos] = pair_p[south_k[c]]; pos += 1
+        end
+        idx_diag[c] = pos; rowval[pos] = c; pos += 1
+        if north_k[c] > 0
+            idx_north[c] = pos; rowval[pos] = pair_q[north_k[c]]; pos += 1
+        end
+        if east_k[c] > 0
+            idx_east[c] = pos; rowval[pos] = pair_q[east_k[c]]; pos += 1
+        end
+    end
+    return Stencil(ncell, cell_lin, cell_col, cell_tsurf,
+                   pair_first, pair_last,
+                   pair_p, pair_q, pair_plin, pair_qlin, pair_area, pair_dist,
+                   similar(pair_area),
+                   btop, bbot,
+                   east_k, north_k, west_k, south_k,
+                   idx_west, idx_south, idx_north, idx_east, idx_diag,
+                   colptr, rowval, dx, dz)
 end
 
 # ----------------------------------------------------------------------------
@@ -481,103 +714,252 @@ end
 
 function thermal_properties!(lam::Matrix{Float64}, rho_c::Matrix{Float64},
                              source::Matrix{Float64}, temperature_c::Matrix{Float64},
-                             grid::Grid, lith_properties::Dict{Int,LithProp}, config::SolverConfig)
+                             grid::Grid, lookup::LithoPropLookup, config::SolverConfig)
     fill!(lam, NaN); fill!(rho_c, NaN); fill!(source, NaN)
-    for idx in eachindex(temperature_c)
+    @inbounds for idx in eachindex(temperature_c)
         grid.active[idx] || continue
-        code = grid.lith[idx]
-        haskey(lith_properties, code) ||
-            throw(KeyError("Unknown lithotype code $code; available: $(sort(collect(keys(lith_properties))))"))
-        prop = lith_properties[code]
+        li = lookup_index(lookup, grid.lith[idx])
         tk = temperature_c[idx] + 273.15
         phi = grid.phi[idx]
-        lam_s = sekiguchi_conductivity(tk, prop.lambda20)
-        c_s = waples_heat_capacity(tk, prop.c20)
+        lam_s = sekiguchi_conductivity(tk, lookup.lambda20[li])
+        c_s = waples_heat_capacity(tk, lookup.c20[li])
         lam[idx] = lam_s^(1.0 - phi) * config.fluid_lambda^phi
-        rho_c[idx] = (1.0 - phi) * prop.rho_s * c_s +
+        rho_c[idx] = (1.0 - phi) * lookup.rho_s[li] * c_s +
                      phi * config.fluid_density * config.fluid_heat_capacity
-        source[idx] = (1.0 - phi) * prop.As
+        source[idx] = (1.0 - phi) * lookup.As[li]
     end
     return lam, rho_c, source
 end
 
-function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::AbstractVector,
-                           dx::Float64, dz::Float64, dt_seconds::Float64,
-                           lith_properties::Dict{Int,LithProp}, config::SolverConfig;
-                           grid::Union{Nothing,Grid} = nothing)
-    grid === nothing && (grid = rasterize(state, z))
-    active = grid.active
-    nz, nx = size(active)
-    ncell = count(active)
-    indices = zeros(Int, nz, nx)
-    indices[active] = 1:ncell
-    lam = similar(transported_c); rho_c = similar(transported_c); source = similar(transported_c)
-    trial = copy(transported_c)
-    updated = similar(transported_c)
+function thermal_properties!(lam::Matrix{Float64}, rho_c::Matrix{Float64},
+                             source::Matrix{Float64}, temperature_c::Matrix{Float64},
+                             grid::Grid, lith_properties::Dict{Int,LithProp}, config::SolverConfig)
+    return thermal_properties!(lam, rho_c, source, temperature_c, grid,
+                               LithoPropLookup(lith_properties), config)
+end
+
+"""7.2: Picard-цикл с переиспользуемым workspace.
+assemble!(trial, w, stencil) заполняет w.diag, w.rhs, stencil.pair_g и возвращает guess;
+scatter!(w, sol) пишет решение в w.field_b и возвращает ссылку.
+Double-buffer: trial/updated — матрицы nz×nx с NaN в неактивных ячейках."""
+function picard_cycle(config, transported::Matrix{Float64}, w::FvmWorkspace, stencil::Stencil,
+                      assemble!, scatter!;
+                      linear_tolerance::Float64, linear_max_iterations::Int)
+    trial = w.field_a
+    updated = w.field_b
+    copyto!(trial, transported)
     max_change = Inf
     linear_iterations = 0
     linear_residual = Inf
     picard_used = 0
-
     for iteration in 1:config.picard_iterations
         picard_used = iteration
-        thermal_properties!(lam, rho_c, source, trial, grid, lith_properties, config)
-        volume = dx * dz
-        diagonal = rho_c[active] .* volume ./ dt_seconds
-        rhs = diagonal .* transported_c[active] .+ source[active] .* volume
-        pair_p = Int[]
-        pair_q = Int[]
-        pair_g = Float64[]
-
-        for idx in CartesianIndices(active)
-            j, i = Tuple(idx)
-            active[j, i] || continue
-            p = indices[j, i]
-
-            # Each internal face is inserted once, from its west/north cell.
-            for (dj, di, area, distance) in ((0, 1, dz, dx), (1, 0, dx, dz))
-                jj, ii = j + dj, i + di
-                if 1 <= jj <= nz && 1 <= ii <= nx && active[jj, ii]
-                    conductance = harmonic(lam[j, i], lam[jj, ii]) * area / distance
-                    q = indices[jj, ii]
-                    diagonal[p] += conductance
-                    diagonal[q] += conductance
-                    push!(pair_p, p); push!(pair_q, q); push!(pair_g, conductance)
-                end
-            end
-
-            # Physical top/bottom boundaries on the stair-step domain.
-            for dj in (-1, 1)
-                jj = j + dj
-                if !(1 <= jj <= nz) || !active[jj, i]
-                    face_z = z[j] + 0.5 * dj * dz
-                    surface_distance = abs(face_z - state.surface[i])
-                    base_distance = abs(face_z - state.base[i])
-                    if surface_distance <= base_distance
-                        conductance = lam[j, i] * dx / (0.5 * dz)
-                        diagonal[p] += conductance
-                        rhs[p] += conductance * state.tsurf[i]
-                    else
-                        rhs[p] += state.qbasal[i] * dx
-                    end
-                end
-            end
+        guess = assemble!(trial, w, stencil)
+        linear_iterations, linear_residual = pcg_solve!(
+            w.sol, w.residual, w.zvec, w.direction, w.applied,
+            w.diag, stencil.pair_p, stencil.pair_q, stencil.pair_g, w.rhs, guess;
+            tolerance = linear_tolerance, max_iterations = linear_max_iterations)
+        updated = scatter!(updated, w, w.sol)
+        max_change = 0.0
+        for k in eachindex(stencil.cell_lin)
+            d = abs(updated[stencil.cell_lin[k]] - trial[stencil.cell_lin[k]])
+            max_change = max(max_change, d)
         end
+        trial, updated = updated, trial
+        max_change <= config.picard_tolerance_c && break
+    end
+    return trial, picard_used, max_change, linear_iterations, linear_residual
+end
 
+"""Прямой Picard-цикл: матрица шага с фиксированным CSC-паттерном перестраивается
+и факторизуется (Холецкий) на каждой итерации Пикара; решение — обратная подстановка.
+Численно эквивалентен PCG-пути с точностью до линейной точности (прямое решение
+точнее допуска pcg_tolerance)."""
+function picard_cycle_direct(config, transported::Matrix{Float64}, w::FvmWorkspace,
+                             s::Stencil, lookup, grid, state::State,
+                             transported_c::Matrix{Float64}, dt_seconds::Float64,
+                             volume::Float64, scatter!)
+    ncell = s.ncell
+    nzval = Vector{Float64}(undef, length(s.rowval))
+    A = SparseMatrixCSC(ncell, ncell, s.colptr, s.rowval, nzval)
+    trial = w.field_a
+    updated = w.field_b
+    copyto!(trial, transported)
+    max_change = Inf
+    linear_residual = Inf
+    picard_used = 0
+    factorization = nothing
+    for iteration in 1:config.picard_iterations
+        picard_used = iteration
+        thermal_properties!(w.lam, w.rho_c, w.source, trial, grid, lookup, config)
+        @inbounds for k in eachindex(s.pair_p)
+            s.pair_g[k] = harmonic(w.lam[s.pair_plin[k]], w.lam[s.pair_qlin[k]]) *
+                          s.pair_area[k] / s.pair_dist[k]
+        end
+        @inbounds for c in 1:ncell
+            lin = s.cell_lin[c]
+            d = w.rho_c[lin] * volume / dt_seconds
+            r = d * transported_c[lin] + w.source[lin] * volume
+            if s.west_k[c] > 0
+                g = s.pair_g[s.west_k[c]]
+                d += g; nzval[s.idx_west[c]] = -g
+            end
+            if s.south_k[c] > 0
+                g = s.pair_g[s.south_k[c]]
+                d += g; nzval[s.idx_south[c]] = -g
+            end
+            if s.north_k[c] > 0
+                g = s.pair_g[s.north_k[c]]
+                d += g; nzval[s.idx_north[c]] = -g
+            end
+            if s.east_k[c] > 0
+                g = s.pair_g[s.east_k[c]]
+                d += g; nzval[s.idx_east[c]] = -g
+            end
+            nzval[s.idx_diag[c]] = d
+            if s.btop[c] == 1
+                g = w.lam[lin] * s.dx / (0.5 * s.dz)
+                nzval[s.idx_diag[c]] = d + g
+                r += g * s.cell_tsurf[c]
+            elseif s.btop[c] == 2
+                r += state.qbasal[s.cell_col[c]] * s.dx
+            end
+            if s.bbot[c] == 1
+                g = w.lam[lin] * s.dx / (0.5 * s.dz)
+                nzval[s.idx_diag[c]] += g
+                r += g * s.cell_tsurf[c]
+            elseif s.bbot[c] == 2
+                r += state.qbasal[s.cell_col[c]] * s.dx
+            end
+            w.rhs[c] = r
+        end
+        # Символьная факторизация зависит только от паттерна (стенсила): кешируется
+        # по объекту стенсила, что устраняет повторный анализ между оценками theta.
+        factorization = get(CHOLMOD_FACTOR_CACHE, s, nothing)
+        if factorization === nothing
+            factorization = cholesky(Symmetric(A))
+            CHOLMOD_FACTOR_CACHE[s] = factorization
+        else
+            cholesky!(factorization, Symmetric(A))
+        end
+        ldiv!(w.sol, factorization, w.rhs)
+        scatter!(updated, w, w.sol)
+        max_change = 0.0
+        @inbounds for k in eachindex(s.cell_lin)
+            d = abs(updated[s.cell_lin[k]] - trial[s.cell_lin[k]])
+            max_change = max(max_change, d)
+        end
+        trial, updated = updated, trial
+        max_change <= config.picard_tolerance_c && break
+    end
+    # Фактическая относительная невязка последнего решения.
+    matvec = A * w.sol
+    residual = 0.0
+    rhs_norm = 0.0
+    @inbounds for k in 1:ncell
+        residual += (matvec[k] - w.rhs[k])^2
+        rhs_norm += w.rhs[k]^2
+    end
+    linear_residual = sqrt(residual / max(rhs_norm, 1.0e-300))
+    return trial, picard_used, max_change, 0, linear_residual
+end
+
+"""Общий Picard-цикл для legacy/адаптивного решателя (создаёт буферы сам)."""
+function picard_cycle(config, transported, assemble!, scatter;
+                      linear_tolerance::Float64, linear_max_iterations::Int)
+    trial = copy(transported)
+    updated = similar(transported)
+    max_change = Inf
+    linear_iterations = 0
+    linear_residual = Inf
+    picard_used = 0
+    for iteration in 1:config.picard_iterations
+        picard_used = iteration
+        diagonal, pair_p, pair_q, pair_g, rhs, guess = assemble!(trial)
         solution, linear_iterations, linear_residual = pcg_solve(
-            diagonal, pair_p, pair_q, pair_g, rhs, trial[active];
-            tolerance = config.pcg_tolerance,
-            max_iterations = max(2000, 8 * config.nx * config.nz),
-        )
-        fill!(updated, NaN)
-        updated[active] = solution
-        max_change = -Inf                      # np.nanmax(np.abs(updated - trial))
+            diagonal, pair_p, pair_q, pair_g, rhs, guess;
+            tolerance = linear_tolerance, max_iterations = linear_max_iterations)
+        updated = scatter(solution)
+        max_change = -Inf
         for k in eachindex(updated)
             d = abs(updated[k] - trial[k])
             isnan(d) || (max_change = max(max_change, d))
         end
-        trial, updated = updated, trial        # double buffer, без копий
+        trial, updated = updated, trial
         max_change <= config.picard_tolerance_c && break
+    end
+    return trial, picard_used, max_change, linear_iterations, linear_residual
+end
+
+function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::AbstractVector,
+                           dx::Float64, dz::Float64, dt_seconds::Float64,
+                           lookup::LithoPropLookup, config::SolverConfig;
+                           grid::Union{Nothing,Grid} = nothing,
+                           stencil::Union{Nothing,Stencil} = nothing,
+                           workspace::Union{Nothing,FvmWorkspace} = nothing)
+    grid === nothing && (grid = rasterize(state, z))
+    stencil === nothing && (stencil = build_stencil(grid, state, z, dx, dz))
+    workspace === nothing && (workspace = FvmWorkspace(config.nz, config.nx))
+    active = grid.active
+    ncell = stencil.ncell
+    workspace.ncell = ncell
+    resize!(workspace.diag, ncell); resize!(workspace.rhs, ncell)
+    resize!(workspace.sol, ncell); resize!(workspace.residual, ncell)
+    resize!(workspace.zvec, ncell); resize!(workspace.direction, ncell)
+    resize!(workspace.applied, ncell)
+    volume = dx * dz
+
+    function assemble!(trial::Matrix{Float64}, w::FvmWorkspace, s::Stencil)
+        thermal_properties!(w.lam, w.rho_c, w.source, trial, grid, lookup, config)
+        @inbounds for k in 1:ncell
+            lin = s.cell_lin[k]
+            w.diag[k] = w.rho_c[lin] * volume / dt_seconds
+            w.rhs[k] = w.diag[k] * transported_c[lin] + w.source[lin] * volume
+        end
+        # Порядок накопления повторяет прежнюю сборку: по ячейкам в column-major,
+        # пары ячейки, затем верхняя грань, затем нижняя.
+        @inbounds for c in 1:ncell
+            for k in s.pair_first[c]:s.pair_last[c]
+                g = harmonic(w.lam[s.pair_plin[k]], w.lam[s.pair_qlin[k]]) * s.pair_area[k] / s.pair_dist[k]
+                s.pair_g[k] = g
+                w.diag[s.pair_p[k]] += g
+                w.diag[s.pair_q[k]] += g
+            end
+            if s.btop[c] == 1
+                g = w.lam[s.cell_lin[c]] * s.dx / (0.5 * s.dz)
+                w.diag[c] += g
+                w.rhs[c] += g * s.cell_tsurf[c]
+            elseif s.btop[c] == 2
+                w.rhs[c] += state.qbasal[s.cell_col[c]] * s.dx
+            end
+            if s.bbot[c] == 1
+                g = w.lam[s.cell_lin[c]] * s.dx / (0.5 * s.dz)
+                w.diag[c] += g
+                w.rhs[c] += g * s.cell_tsurf[c]
+            elseif s.bbot[c] == 2
+                w.rhs[c] += state.qbasal[s.cell_col[c]] * s.dx
+            end
+        end
+        return trial[active]
+    end
+
+    function scatter!(out::Matrix{Float64}, w::FvmWorkspace, sol::Vector{Float64})
+        fill!(out, NaN)
+        @inbounds for k in 1:ncell
+            out[stencil.cell_lin[k]] = sol[k]
+        end
+        return out
+    end
+
+    if config.linear_solver == :direct
+        trial, picard_used, max_change, linear_iterations, linear_residual =
+            picard_cycle_direct(config, transported_c, workspace, stencil, lookup, grid,
+                                state, transported_c, dt_seconds, volume, scatter!)
+    else
+        trial, picard_used, max_change, linear_iterations, linear_residual = picard_cycle(
+            config, transported_c, workspace, stencil, assemble!, scatter!;
+            linear_tolerance = config.pcg_tolerance,
+            linear_max_iterations = max(2000, 8 * config.nx * config.nz))
     end
 
     return trial, OrderedDict{String,Any}(
@@ -586,6 +968,19 @@ function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::Abst
         "linear_iterations" => linear_iterations,
         "linear_relative_residual" => linear_residual,
     )
+end
+
+"Legacy-совместимая обёртка с Dict-lookup литологий и без workspace."
+function implicit_fvm_step(transported_c::Matrix{Float64}, state::State, z::AbstractVector,
+                           dx::Float64, dz::Float64, dt_seconds::Float64,
+                           lith_properties::Dict{Int,LithProp}, config::SolverConfig;
+                           grid::Union{Nothing,Grid} = nothing)
+    grid === nothing && (grid = rasterize(state, z))
+    stencil = build_stencil(grid, state, z, dx, dz)
+    workspace = FvmWorkspace(config.nz, config.nx)
+    return implicit_fvm_step(transported_c, state, z, dx, dz, dt_seconds,
+                             LithoPropLookup(lith_properties), config;
+                             grid = grid, stencil = stencil, workspace = workspace)
 end
 
 function initialise_temperature(state::State, z::AbstractVector, config::SolverConfig;
@@ -604,6 +999,7 @@ end
 struct StepGeometry
     state::State                       # тета-независимая часть, qbasal = zeros
     grid::Grid
+    stencil::Stencil                   # построенный один раз стенсил
     age_old::Float64
     age_young::Float64
     fraction::Float64
@@ -637,7 +1033,9 @@ function precompute_geometry(data::BasinDataset, config::SolverConfig)
         for substep in 1:n_substeps
             fraction = substep / n_substeps
             state = interpolate_state(exact[age_old], exact[age_young], fraction)
-            push!(steps, StepGeometry(state, rasterize(state, z), age_old, age_young,
+            grid = rasterize(state, z)
+            stencil = build_stencil(grid, state, z, dx, dz)
+            push!(steps, StepGeometry(state, grid, stencil, age_old, age_young,
                                       fraction, (span / n_substeps) * SECONDS_PER_MA))
         end
     end
@@ -659,7 +1057,10 @@ function run_forward_param(data::BasinDataset, config::SolverConfig,
     temperature = initialise_temperature(s0, z, config; grid = geometry.exact_grids[age0])
     saved_temperature = [copy(temperature)]
     diagnostics = OrderedDict{String,Any}[]
+    lookup = LithoPropLookup(data.properties)
+    workspace = FvmWorkspace(config.nz, config.nx)
 
+    Progress.bar_start(length(geometry.steps), "Forward time steps")
     start = time_ns()
     previous_state = s0
     previous_grid = geometry.exact_grids[age0]
@@ -671,9 +1072,10 @@ function run_forward_param(data::BasinDataset, config::SolverConfig,
         transported = material_remap(temperature, previous_state, state, z;
                                      old_grid = previous_grid, new_grid = step.grid)
         temperature, diag = implicit_fvm_step(
-            transported, state, z, dx, dz, step.dt_seconds, data.properties, config;
-            grid = step.grid)
+            transported, state, z, dx, dz, step.dt_seconds, lookup, config;
+            grid = step.grid, stencil = step.stencil, workspace = workspace)
         push!(diagnostics, merge(OrderedDict{String,Any}("age_ma" => state.age), diag))
+        Progress.bar_add(1, @sprintf("Forward time steps · age %.1f Ma", state.age))
         previous_state = state
         previous_grid = step.grid
         # снимок на границе эпохи — как в classic (push внутри цикла по эпохам)
@@ -682,6 +1084,7 @@ function run_forward_param(data::BasinDataset, config::SolverConfig,
             push!(saved_temperature, copy(temperature))
         end
     end
+    Progress.bar_finish()
 
     final_grid = geometry.exact_grids[data.ages[end]]
     elapsed = (time_ns() - start) / 1.0e9
@@ -725,23 +1128,35 @@ function run_forward(data::BasinDataset, config::SolverConfig;
     saved_temperature = [copy(temperature)]
     diagnostics = OrderedDict{String,Any}[]
 
+    total_steps = sum(max(1, Int(ceil((data.ages[k] - data.ages[k+1]) / config.max_dt_ma)))
+                      for k in 1:length(data.ages)-1)
+    Progress.bar_start(total_steps, "Forward time steps")
     start = time_ns()
+    lookup = LithoPropLookup(data.properties)
+    workspace = FvmWorkspace(config.nz, config.nx)
     for (age_old, age_young) in zip(data.ages[1:end-1], data.ages[2:end])
         span = age_old - age_young
         n_substeps = max(1, Int(ceil(span / config.max_dt_ma)))
         previous_state = exact[age_old]
+        previous_grid = rasterize(previous_state, z)
         for substep in 1:n_substeps
             fraction = substep / n_substeps
             state = interpolate_state(exact[age_old], exact[age_young], fraction)
-            transported = material_remap(temperature, previous_state, state, z)
+            grid = rasterize(state, z)
+            transported = material_remap(temperature, previous_state, state, z;
+                                         old_grid = previous_grid, new_grid = grid)
             dt_seconds = (span / n_substeps) * SECONDS_PER_MA
             temperature, diag = implicit_fvm_step(
-                transported, state, z, dx, dz, dt_seconds, data.properties, config)
+                transported, state, z, dx, dz, dt_seconds, lookup, config;
+                grid = grid, workspace = workspace)
             push!(diagnostics, merge(OrderedDict{String,Any}("age_ma" => state.age), diag))
+            Progress.bar_add(1, @sprintf("Forward time steps · age %.1f Ma", state.age))
             previous_state = state
+            previous_grid = grid
         end
         push!(saved_temperature, copy(temperature))
     end
+    Progress.bar_finish()
 
 
     final_state = exact[data.ages[end]]
@@ -811,6 +1226,7 @@ end
 # ----------------------------------------------------------------------------
 
 function main(argv = ARGS)
+    Progress.init()
     s = ArgParseSettings(description = "2-D basin finite-volume forward solver")
     @add_arg_table! s begin
         "--data-dir"
@@ -876,6 +1292,12 @@ function main(argv = ARGS)
     update_manifest(cache_dir, metadata)
     println("SAVED $(joinpath(run_dir, "result.npz"))")
     println(@sprintf("T_FINAL %.3f %.3f C", minimum(finite), maximum(finite)))
+    nsteps = length(result.diagnostics)
+    @printf("TIME total %s | forward %s | %d steps, %.2f s/step | 1 J-eval ~ 1 forward
+",
+            Progress.fmt_time_public(result.elapsed_seconds),
+            Progress.fmt_time_public(result.elapsed_seconds), nsteps,
+            result.elapsed_seconds / max(nsteps, 1))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

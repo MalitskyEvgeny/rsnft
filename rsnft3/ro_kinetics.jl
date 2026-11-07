@@ -87,11 +87,12 @@ function particle_ro(result, data, xq::Float64, layer_name::String, eta::Float64
         lo === nothing && (deposited && break; continue)
         top, bot = lo
         zp = top + eta * (bot - top)
-        # билинейная выборка T с клэмпом к активной зоне
-        xi = clamp(round(Int, (xq - xg[1]) / dxg) + 1, 1, nx)
-        zi = clamp(round(Int, (zp - zg[1]) / dzg) + 1, 1, nz)
-        v = temp[k, zi, xi]
+        # 5.3: билинейная выборка T (согласовано с T-остатками objective) с
+        # фолбэком к ближайшему конечному узлу при NaN-стенсиле
+        v = bilinear_sample(xg, zg, temp[k, :, :], xq, zp)
         if isnan(v)
+            xi = clamp(round(Int, (xq - xg[1]) / dxg) + 1, 1, nx)
+            zi = clamp(round(Int, (zp - zg[1]) / dzg) + 1, 1, nz)
             for d in 1:nz
                 if zi + d <= nz && isfinite(temp[k, zi+d, xi])
                     v = temp[k, zi+d, xi]; break

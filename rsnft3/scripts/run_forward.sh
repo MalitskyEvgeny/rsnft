@@ -18,6 +18,7 @@
 #   --nx N --nz N        сетка равномерного солвера (60 120; только с --uniform)
 #   --max-dt-ma F        максимальный шаг по времени, Ма (2.5)
 #   --picard-iters N     итерации Пикара (3)
+#   --threads N          Julia-потоки (8)
 #   --out FILE           куда писать отчёт (results/report_forward_<timestamp>/report.html)
 #   --force              пересчитать, даже если результат в кэше
 #   --open               открыть отчёт в браузере
@@ -27,6 +28,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R3="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$R3/.." && pwd)"
 JULIA=${JULIA:-julia}
+# Флаги производительности: максимум оптимизации и отказ от проверок границ
+# (индексы везде @inbounds). Отключается переменной RSNFT_SAFE=1.
+if [[ "${RSNFT_SAFE:-0}" != "1" ]]; then
+    JULIA_PERF_FLAGS="-O3 --check-bounds=no"
+else
+    JULIA_PERF_FLAGS=""
+fi
+THREADS=8
 
 DATA_DIR=""
 ADAPTIVE_BASE="16,32"
@@ -57,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --nz)             NZ="$2"; shift 2 ;;
         --max-dt-ma)      MAX_DT_MA="$2"; shift 2 ;;
         --picard-iters)   PICARD="$2"; shift 2 ;;
+        --threads)        THREADS="$2"; shift 2 ;;
         --out)            OUT="$2"; shift 2 ;;
         --force)          FORCE=1; shift ;;
         --open)           OPEN=1; shift ;;
@@ -77,12 +87,13 @@ OUT_DIR="$(to_julia_path "$OUT_DIR")"
 
 SOLVER="$R3/adaptive_basin_fvm.jl"
 if [[ $UNIFORM -eq 1 ]]; then
-    echo "=== forward (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
+    SOLVER="$R3/basin_fvm.jl"
+    echo "=== Stage 1/2: forward solve (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --nx "$NX" --nz "$NZ" --max-dt-ma "$MAX_DT_MA"
                  --picard-iterations "$PICARD")
 else
-    echo "=== forward (adaptive): $(basename "$DATA_DIR"), base $ADAPTIVE_BASE, level $ADAPTIVE_LEVEL ==="
+    echo "=== Stage 1/2: forward solve (adaptive): $(basename "$DATA_DIR"), base $ADAPTIVE_BASE, level $ADAPTIVE_LEVEL ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --base-nx "${ADAPTIVE_BASE%,*}" --base-nz "${ADAPTIVE_BASE#*,}"
                  --max-level "$ADAPTIVE_LEVEL" --max-dt-ma "$MAX_DT_MA"
@@ -90,13 +101,13 @@ else
 fi
 [[ $FORCE -eq 1 ]] && SOLVER_ARGS+=(--force)
 
-RUN_LINE="$("$JULIA" --project="$R3" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
+RUN_LINE="$("$JULIA" --project="$R3" $JULIA_PERF_FLAGS -t "$THREADS" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
 RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d ':')"
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
 
-echo "=== report ==="
-"$JULIA" --project="$R3" "$R3/report_full.jl" --direct "$RUN_DIR" --out "$OUT_DIR/report.html"
+echo "=== Stage 2/2: report ==="
+"$JULIA" --project="$R3" $JULIA_PERF_FLAGS "$R3/report_full.jl" --direct "$RUN_DIR" --out "$OUT_DIR/report.html"
 
 echo "=== summary ==="
 echo "report   : $OUT_DIR/report.html"

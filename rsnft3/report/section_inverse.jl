@@ -42,11 +42,23 @@ function section_inverse(io::IOBuffer, iv::InverseData)
     println(io, "<h2 class=\"sec\">Обратная задача — «", esc(iv.run_name), "»</h2>")
 
     pass2s = _pass(c)
-    println(io, "<h3>Приёмка (условие 18)</h3>")
+    n_art = get(c, "n_artifact", nothing)
+    n_kept = get(c, "n_kept", nothing)
+    println(io, "<h3>Приёмка (условие 18, строгая)</h3>")
     println(io, "<p><span class=\"badge ", pass2s ? "ok" : "bad", "\">",
             pass2s ? "ПРОЙДЕНО" : "НЕ ВЫПОЛНЕНО", "</span> ",
-            "<span class=\"small\">RMSE ≤ 2σ и ≥ 95% точек в пределах 2σ</span></p>")
+            "<span class=\"small\">RMSE ≤ 2σ и ≥ 95% точек в пределах 2σ и 0 артефактных точек</span></p>")
     println(io, "<div class=\"cards\">")
+    if n_art !== nothing && n_art > 0
+        println(io, "<p class=\"small\"><b>Артефактные точки: ", n_art,
+                "</b> — модель в этих точках не определена (вырожденная/NaN-выборка); ",
+                "приёмка не может считаться пройденной.</p>")
+    end
+    if n_art !== nothing && n_kept !== nothing
+        tot = n_art + n_kept
+        tot > 0 && println(io, "<p class=\"small\">Доля артефактных точек: ",
+                @sprintf("%.1f%%", 100.0 * n_art / tot), " (kept ", n_kept, " / dropped ", n_art, ")</p>")
+    end
     okT = c["frac_2s_T"] === nothing || c["frac_2s_T"] >= 0.95
     okR = c["frac_2s_Ro"] === nothing || c["frac_2s_Ro"] >= 0.95
     defT = c["frac_2s_T"] === nothing ? "" :
@@ -63,6 +75,9 @@ function section_inverse(io::IOBuffer, iv::InverseData)
     println(io, "</div>")
 
     _theta_section(io, iv)
+    _theta_true_section(io, iv)
+    _ensemble_spread_section(io, iv)
+    _limitations_section(io, iv)
     _ensemble_q_section(io, iv)
     _ensemble_scatter(io, iv)
     _ensemble_table(io, iv)
@@ -75,10 +90,12 @@ function section_inverse(io::IOBuffer, iv::InverseData)
 end
 
 function _pass(c::AbstractDict)
+    haskey(c, "passed") && return c["passed"] === true
     f2T, f2R = c["frac_2s_T"], c["frac_2s_Ro"]
     okT = f2T === nothing || f2T >= 0.95
     okR = f2R === nothing || f2R >= 0.95
-    return okT && okR
+    n_art = get(c, "n_artifact", 0)
+    return okT && okR && n_art == 0
 end
 
 function _metric(io::IOBuffer, label::String, value::String)
@@ -377,9 +394,85 @@ end
 
 # --- Согласованность ансамбля --------------------------------------------------
 
-"Линии q(x) всех стартов ансамбля по эпохам (разброс = мера идентифицируемости)."
+"5.1: twin-режим — таблица θ_true vs θ̂ по эпохам/узлам."
+function _theta_true_section(io::IOBuffer, iv::InverseData)
+    sol = iv.sol
+    haskey(sol, "theta_true") && sol["theta_true"] !== nothing || return
+    tt = sol["theta_true"]
+    layout = sol["layout"]
+    nodes_km = Vector{Float64}(layout["nodes_x"]) ./ 1000
+    epochs = layout["epochs"]
+    nxq = length(nodes_km)
+    th_true = Vector{Float64}(tt["theta"])
+    th_hat = Vector{Float64}(sol["best"]["theta"])
+    q_true = tt["epoch_q_mwm2"]
+    println(io, "<h3>Twin: θ_true vs θ̂</h3>")
+    println(io, "<p class=\"small\">Заданная истина по эпохам: ",
+            join([@sprintf("%.0f", q) for q in q_true], " / "), " мВт/м². ",
+            "Отклонение θ̂ от θ_true — мера восстановимости при данных σ.</p>")
+    rows = IOBuffer()
+    for (ie, e) in enumerate(epochs)
+        for (ix, xkm) in enumerate(nodes_km)
+            i = (ie - 1) * nxq + ix
+            err = th_hat[i] - th_true[i]
+            print(rows, "<tr><td>", @sprintf("%.0f–%.0f", e[1], e[2]), "</td><td>",
+                  @sprintf("%.1f", xkm), "</td><td>", fmt(th_true[i]; d = 1),
+                  "</td><td>", fmt(th_hat[i]; d = 1), "</td><td>",
+                  fmt(err; d = 1), "</td></tr>")
+        end
+    end
+    println(io, "<table><tr><th>Эпоха, Ma</th><th>X, км</th><th>θ_true</th><th>θ̂</th><th>Δ</th></tr>",
+            String(take!(rows)), "</table>")
+end
 
-"Линии q(x) всех стартов ансамбля по эпохам (разброс = мера идентифицируемости)."
+"5.2: разброс ансамбля min/median/max по эпохам и узлам."
+function _ensemble_spread_section(io::IOBuffer, iv::InverseData)
+    sol = iv.sol
+    ens = get(sol, "ensemble", Any[])
+    length(ens) < 2 && return
+    layout = sol["layout"]
+    nodes_km = Vector{Float64}(layout["nodes_x"]) ./ 1000
+    epochs = layout["epochs"]
+    nxq = length(nodes_km)
+    M = hcat([Vector{Float64}(m["theta"]) for m in ens]...)   # (nq, n_starts)
+    println(io, "<h3>Разброс ансамбля по узлам (min / median / max)</h3>")
+    rows = IOBuffer()
+    for (ie, e) in enumerate(epochs)
+        for (ix, xkm) in enumerate(nodes_km)
+            i = (ie - 1) * nxq + ix
+            v = M[i, :]
+            print(rows, "<tr><td>", @sprintf("%.0f–%.0f", e[1], e[2]), "</td><td>",
+                  @sprintf("%.1f", xkm), "</td><td>", fmt(minimum(v); d = 1),
+                  "</td><td>", fmt(median(v); d = 1), "</td><td>", fmt(maximum(v); d = 1),
+                  "</td><td>", fmt(maximum(v) - minimum(v); d = 1), "</td></tr>")
+        end
+    end
+    println(io, "<p class=\"small\">Широкий разброс = неидентифицируемость узла ",
+            "(данные не различают решения); расхождение median и лучшего ",
+            "— сигнал мультимодальности.</p>")
+    println(io, "<table><tr><th>Эпоха, Ma</th><th>X, км</th><th>min</th><th>median</th><th>max</th><th>размах</th></tr>",
+            String(take!(rows)), "</table>")
+end
+
+"5.4: секция «Ограничения» — интерпретация результатов."
+function _limitations_section(io::IOBuffer, iv::InverseData)
+    println(io, "<h3>Ограничения анализа</h3>")
+    println(io, "<ul class=\"small\">")
+    println(io, "<li><b>Неидентифицируемость палеотеплового потока.</b> q(x, t) ",
+            "восстанавливается по сегодняшнему термическому состоянию (T, %Ro); ",
+            "разные комбинации потока и теплопроводности могут давать близкие профили. ",
+            "Боксы θ сужают пространство, но не устраняют вырожденность.</li>")
+    println(io, "<li><b>Схлопывание ансамбля.</b> Малый разброс стартов может означать ",
+            "как хорошую сходимость, так и то, что все старты застряли в одном ",
+            "притягивающем бассейне; проверяйте разброс по узлам и J ансамбля.</li>")
+    println(io, "<li><b>RMSE на разных сетках несопоставим.</b> J включает дискретизационное ",
+            "смещение: сравнение RMSE между прогонами на разных сетках некорректно ",
+            "без пересчёта критериев на одной сетке (см. drift-check в c2f).</li>")
+    println(io, "<li><b>σ наблюдений.</b> Доля точек в 2σ и passed зависят от заявленной σ; ",
+            "при σ = 0 (точный twin) критерии вырождаются в точное совпадение.</li>")
+    println(io, "</ul>")
+end
+
 function _ensemble_q_section(io::IOBuffer, iv::InverseData)
     sol = iv.sol
     ens = sol["ensemble"]

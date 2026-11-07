@@ -18,9 +18,9 @@ function check(name, ok)
 end
 
 # --- 1. frac_within / rmse ---
-check("frac_within: 3 of 4 within 1σ", frac_within([0.5, -0.9, 1.5, 2.0], 1.0, 1) == 0.5)
-check("frac_within: all within 2σ", frac_within([0.5, -0.9, 1.5, 2.0], 1.0, 2) == 1.0)
-check("frac_within: empty -> NaN", isnan(frac_within(Float64[], 1.0, 1)))
+check("frac_within: 2 of 4 within 1σ", frac_within([(0.5, 1.0), (-0.9, 1.0), (1.5, 1.0), (2.0, 1.0)], 1) == 0.5)
+check("frac_within: all within 2σ", frac_within([(0.5, 1.0), (-0.9, 1.0), (1.5, 1.0), (2.0, 1.0)], 2) == 1.0)
+check("frac_within: empty -> NaN", isnan(frac_within(Tuple{Float64,Float64}[], 1)))
 check("rmse", abs(rmse([1.0, -1.0]) - 1.0) < 1e-12)
 
 # --- 2. l2_error: трапеции на аналитике ---

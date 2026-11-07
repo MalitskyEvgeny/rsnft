@@ -24,9 +24,9 @@
 #   --adaptive-base N,M адаптивная база инверсии (16,32)
 #   --adaptive-level N  адаптивный уровень инверсии (2)
 #   --uniform           равномерные сетки вместо адаптивных
-#   --nx N --nz N       сетка равномерной прямой задачи (60 120; только с --uniform)
-#   --ensemble N --workers N --de-budget N --nm-iterations N
-#   --sigma-T F --sigma-Ro F --reg F --seed N
+#   --nx N --nz N       сетка равномерной прямой задачи (30 60; только с --uniform)
+#   --ensemble N --workers N (0 = авто; по умолчанию 0) --de-budget N (2000) --nm-iterations N (200) --threads N
+#   --sigma-T F --sigma-Ro F --reg F (0.3) --seed N
 #   --theta0-file FILE  полировка из готового solution.json (DE пропускается)
 #   --out DIR           каталог отчёта (results/report_full_<timestamp>)
 #   --force             пересчитать прямой прогон, даже если есть в кэше
@@ -44,21 +44,24 @@ WELLS=""
 TWIN=0
 TWIN_Q="75,80,85,90"
 TWIN_SEED=42
-GRID="20,40"
+GRID="30,60"
 BASE="16,32"
 LEVEL=2
 ADAPTIVE_BASE="16,32"
 ADAPTIVE_LEVEL=2
 UNIFORM=0
-NX=60
-NZ=120
-ENSEMBLE=1
-WORKERS=1
+NX=30
+NZ=60
+ENSEMBLE=0   # 0 = авто: по числу логических ядер
+WORKERS=0   # 0 = авто: по числу ансамблей
 DE_BUDGET=2000
-NM_ITERATIONS=30
+THREADS=8
+NM_ITERATIONS=200
 SIGMA_T=2.0
 SIGMA_RO=0.05
-REG=1.0
+REG=0.3
+NODE_XS=""
+EPOCHS=""
 SEED=1
 THETA0=""
 OUT=""
@@ -100,10 +103,13 @@ while [[ $# -gt 0 ]]; do
         --ensemble)      ENSEMBLE="$2"; shift 2 ;;
         --workers)       WORKERS="$2"; shift 2 ;;
         --de-budget)     DE_BUDGET="$2"; shift 2 ;;
+        --threads)       THREADS="$2"; shift 2 ;;
         --nm-iterations) NM_ITERATIONS="$2"; shift 2 ;;
         --sigma-T)       SIGMA_T="$2"; shift 2 ;;
         --sigma-Ro)      SIGMA_RO="$2"; shift 2 ;;
         --reg)           REG="$2"; shift 2 ;;
+        --node-xs)       NODE_XS="$2"; shift 2 ;;
+        --epochs)        EPOCHS="$2"; shift 2 ;;
         --seed)          SEED="$2"; shift 2 ;;
         --theta0-file)   THETA0="$2"; shift 2 ;;
         --out)           OUT="$2"; shift 2 ;;
@@ -132,24 +138,24 @@ OUT_DIR="$(to_julia_path "$OUT_DIR")"
 
 SOLVER="$R3/adaptive_basin_fvm.jl"
 if [[ $UNIFORM -eq 1 ]]; then
-    echo "=== forward (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
+    echo "=== Stage 1/3: forward solve (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --nx "$NX" --nz "$NZ")
     SOLVER="$R3/basin_fvm.jl"
 else
-    echo "=== forward (adaptive): $(basename "$DATA_DIR"), base $BASE, level $LEVEL ==="
+    echo "=== Stage 1/3: forward solve (adaptive): $(basename "$DATA_DIR"), base $BASE, level $LEVEL ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --base-nx "${BASE%,*}" --base-nz "${BASE#*,}"
                  --max-level "$LEVEL")
     SOLVER="$R3/adaptive_basin_fvm.jl"
 fi
 [[ $FORCE -eq 1 ]] && SOLVER_ARGS+=(--force)
-RUN_LINE="$("$JULIA" --project="$R3" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
+RUN_LINE="$("$JULIA" --project="$R3" -t "$THREADS" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
 RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d ':')"
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
 
-echo "=== inverse (wells: $WELLS) ==="
+echo "=== Stage 2/3: inversion (wells: $WELLS) ==="
 INVERSE_ARGS=(--data-dir "$INV_DATA_DIR" --wells "$WELLS" --grid "$GRID"
               --ensemble "$ENSEMBLE" --workers "$WORKERS"
               --de-budget "$DE_BUDGET" --nm-iterations "$NM_ITERATIONS"
@@ -163,18 +169,21 @@ fi
 if [[ $TWIN -eq 1 ]]; then
     TWIN_FILE="$OUT_DIR/twin_grid.json"
     echo "--- twin: q=$TWIN_Q, grid $GRID ---"
-    "$JULIA" --project="$R3" "$R3/make_twin.jl" --data-dir "$INV_DATA_DIR" \
+    "$JULIA" --project="$R3" -t "$THREADS" "$R3/make_twin.jl" --data-dir "$INV_DATA_DIR" \
         --wells "${WELLS%%;*}" --grid "$GRID" --q "$TWIN_Q" \
         --sigma-T "$SIGMA_T" --sigma-Ro "$SIGMA_RO" --seed "$TWIN_SEED" \
         --out "$TWIN_FILE"
     INVERSE_ARGS=(--data-dir "$INV_DATA_DIR" --wells "$TWIN_FILE" "${INVERSE_ARGS[@]:2}")
 fi
+[[ -n "$NODE_XS" ]] && INVERSE_ARGS+=(--node-xs "$NODE_XS")
+[[ -n "$EPOCHS" ]] && INVERSE_ARGS+=(--epochs "$EPOCHS")
+[[ $TWIN -eq 1 ]] && INVERSE_ARGS+=(--q-true "$TWIN_Q")
 [[ -n "$THETA0" ]] && INVERSE_ARGS+=(--theta0-file "$THETA0")
 
-"$JULIA" --project="$R3" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"
+"$JULIA" --project="$R3" -t "$THREADS" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"
 
-echo "=== report ==="
-"$JULIA" --project="$R3" "$R3/report_full.jl" \
+echo "=== Stage 3/3: report ==="
+"$JULIA" --project="$R3" -t "$THREADS" "$R3/report_full.jl" \
     --direct "$RUN_DIR" --inverse "$OUT_DIR/inverse" --out "$OUT_DIR/report.html"
 
 echo "=== summary ==="

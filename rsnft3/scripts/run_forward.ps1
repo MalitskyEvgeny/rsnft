@@ -22,10 +22,19 @@ param(
     [int]   $Nz            = 120,
     [double]$MaxDtMa       = 2.5,
     [int]   $PicardIters   = 3,
+    [int]   $Threads       = 8,
     [string]$Out           = "",
     [switch]$Force,
     [switch]$OpenReport
 )
+
+# UTF-8 консоль (кириллица в логах без '?????')
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch { }
+
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -46,13 +55,13 @@ if (-not $Out) { $Out = Join-Path $RepoRoot "results\report_forward_$TS" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 if ($Uniform) {
-    Write-Host "=== forward (uniform): $(Split-Path -Leaf $DataDir), grid ${Nx}x${Nz} ==="
+    Write-Host "=== Stage 1/2: forward solve (uniform): $(Split-Path -Leaf $DataDir), grid ${Nx}x${Nz} ==="
     $SolverScript = Join-Path $R3 "basin_fvm.jl"
     $SolverArgs = @("--data-dir", $DataDir, "--cache-dir", (Join-Path $RepoRoot "results"),
                     "--nx", "$Nx", "--nz", "$Nz", "--max-dt-ma", "$MaxDtMa",
                     "--picard-iterations", "$PicardIters")
 } else {
-    Write-Host "=== forward (adaptive): $(Split-Path -Leaf $DataDir), base $AdaptiveBase, level $AdaptiveLevel ==="
+    Write-Host "=== Stage 1/2: forward solve (adaptive): $(Split-Path -Leaf $DataDir), base $AdaptiveBase, level $AdaptiveLevel ==="
     $SolverScript = Join-Path $R3 "adaptive_basin_fvm.jl"
     $SolverArgs = @("--data-dir", $DataDir, "--cache-dir", (Join-Path $RepoRoot "results"),
                     "--base-nx", ($AdaptiveBase -split ',')[0], "--base-nz", ($AdaptiveBase -split ',')[1],
@@ -61,7 +70,10 @@ if ($Uniform) {
 }
 if ($Force) { $SolverArgs += "--force" }
 
-$SolverOut = & $JuliaExe "--project=$R3" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+# PS5: stderr native-processa pri 2>&1 stanovitsya ErrorRecord - EAP=Stop ubivaet skript
+$ErrorActionPreference = "Continue"
+$SolverOut = & $JuliaExe "--project=$R3" "-t" "$Threads" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
+$ErrorActionPreference = "Stop"
 $RunLine = ($AllOut | Select-String -Pattern "^(RUN|CACHE_HIT)" | Select-Object -Last 1)
 if (-not $RunLine) { throw "solver did not report a run id" }
 $RunId = (($RunLine.ToString() -replace '[^\w\s]', ' ') -split '\s+' |
@@ -70,8 +82,8 @@ if (-not $RunId) { throw "could not parse run id from: $($RunLine.ToString())" }
 $RunDir = Join-Path $RepoRoot "results\$RunId"
 Write-Host "run dir: $RunDir"
 
-Write-Host "=== report ==="
-& $JuliaExe "--project=$R3" (Join-Path $R3 "report_full.jl") --direct $RunDir --out (Join-Path $Out "report.html")
+Write-Host "=== Stage 2/2: report ==="
+& $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "report_full.jl") --direct $RunDir --out (Join-Path $Out "report.html")
 if ($LASTEXITCODE -ne 0) { throw "report_full.jl failed" }
 
 Write-Host "=== summary ==="
