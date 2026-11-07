@@ -32,8 +32,17 @@ function bilinear_sample_flagged(xg::AbstractVector, zg::AbstractVector, field::
         num += w * v; den += w
     end
     # Вырожденная перенормировка: если конечные углы несут малую долю полной
-    # суммы весов, линейная комбинация не представима — детерминированный NaN.
-    den < BILINEAR_DEN_RATIO * wtot ? (NaN, true) : (num / den, false)
+    # суммы весов, линейная комбинация не представима. Тогда фолбэк — 1D
+    # интерполяция по ближайшей строке/столбцу, где есть конечные углы
+    # (точка наблюдения на поверхности осадочной толщи: слой выше — NaN,
+    # честное значение даёт первая активная строка ниже).
+    den >= BILINEAR_DEN_RATIO * wtot && return (num / den, false)
+    for (a, b, t) in ((v01, v11, tx), (v00, v10, tx), (v10, v11, tz), (v00, v01, tz))
+        if isfinite(a) && isfinite(b)
+            return (a + t * (b - a), false)
+        end
+    end
+    return (NaN, true)
 end
 bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
                 x::Float64, z::Float64) = bilinear_sample_flagged(xg, zg, field, x, z)[1]
