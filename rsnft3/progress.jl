@@ -152,7 +152,7 @@ function bar_finish()
             STATE.value = STATE.total
             render(time())
             n = length(STATE.worker_order)
-            n > 0 && print(stdout, repeat("[1B[K", n), repeat("[1A", n), "\r[K")
+            n > 0 && print(stdout, repeat("[E[K", n), @sprintf("[%dF", n), "\r[K")
             empty!(STATE.workers)
             empty!(STATE.worker_order)
             print(stdout, "\n")
@@ -194,7 +194,7 @@ function worker_bar_update(pid::Int, value::Real, total::Real, caption::Abstract
     b.value = Float64(value)
     b.total = Float64(total)
     b.caption = String(caption)
-    STATE.tty && render_all()
+    STATE.tty && render()
     return nothing
 end
 
@@ -205,7 +205,7 @@ function worker_bar_done(pid::Int)
     b = STATE.workers[pid]
     b.value = b.total
     b.caption = b.caption * " · done"
-    STATE.tty && render_all()
+    STATE.tty && render()
     return nothing
 end
 
@@ -214,7 +214,7 @@ function worker_bars_clear()
     (STATE.enabled && myid() == 1) || return nothing
     if STATE.tty && !isempty(STATE.workers)
         n = length(STATE.worker_order)
-        print(stdout, repeat("[1B[K", n), repeat("[1A", n))
+        print(stdout, repeat("[E[K", n), @sprintf("[%dF", n))
     end
     empty!(STATE.workers)
     empty!(STATE.worker_order)
@@ -251,27 +251,6 @@ end
 
 const CSI_CLEAR = "\r[K"
 
-"Рисование всех воркер-баров (одна строка на воркер), без перемещения курсора."
-function render_all()
-    try
-        print(stdout, CSI_CLEAR)
-        for pid in STATE.worker_order
-            b = STATE.workers[pid]
-            frac = b.total > 0 ? clamp(b.value / b.total, 0.0, 1.0) : 0.0
-            filled = round(Int, frac * WIDTH)
-            bar = repeat("█", filled) * repeat("░", WIDTH - filled)
-            el = b.t0 > 0 ? time() - b.t0 : 0.0
-            print(stdout, @sprintf("  worker %-2d [%s] %3d%% · %s · %s", 
-                                   pid, bar, round(Int, frac * 100), b.caption, fmt_time(el)))
-        end
-        flush(stdout)
-    catch
-        progress_disable!()
-    end
-    return nothing
-end
-
-
 "Строки воркеров под главной: cursor-down + clear, без 
  (один блок с главной строкой)."
 function render_worker_rows()
@@ -283,10 +262,10 @@ function render_worker_rows()
         filled = round(Int, frac * WIDTH)
         bar = repeat("█", filled) * repeat("░", WIDTH - filled)
         el = b.t0 > 0 ? time() - b.t0 : 0.0
-        print(stdout, "[1B[K", @sprintf("  worker %-2d [%s] %3d%% · %s · %s", 
+        print(stdout, "[E[K", @sprintf("  worker %-2d [%s] %3d%% · %s · %s", 
                                pid, bar, round(Int, frac * 100), b.caption, fmt_time(el)))
     end
-    print(stdout, repeat("[1A", n))
+    print(stdout, @sprintf("[%dF", n))
     return nothing
 end
 function render(now::Float64 = time())
