@@ -48,10 +48,11 @@ mutable struct BarState
     last_milestone_value::Float64
     workers::Dict{Int,Bar}          # per-worker bars (pid -> Bar)
     worker_order::Vector{Int}       # stable row order
+    rows::Bool                      # multi-row mode: bar per worker (RSNFT_PROGRESS=rows, Windows Terminal)
 end
 
 const STATE = BarState(false, false, 0, 0, "", false, 0.0, 0.0, "", "", 0.0, 0.0, 0.0, -1.0,
-                      Dict{Int,Bar}(), Int[])
+                      Dict{Int,Bar}(), Int[], false)
 
 "Инициализация по окружению: TTY stderr, env RSNFT_PROGRESS. Вызывать на старте main."
 function init()
@@ -64,6 +65,9 @@ function init()
     enable_vt_console()
     off_env = lowercase(get(ENV, "RSNFT_PROGRESS", "")) in ("off", "0", "no", "none")
     STATE.enabled = !off_env          # off=полное отключение; не-TTY -> вехи, TTY -> полоса
+    # Многострочный режим (бар на каждого воркера) требует полноценного VT (Windows Terminal);
+    # по умолчанию - одна строка (работает в PS5/cmd/git-bash/VS Code).
+    STATE.rows = tty && lowercase(get(ENV, "RSNFT_PROGRESS", "")) == "rows"
     return STATE.enabled
 end
 
@@ -152,7 +156,9 @@ function bar_finish()
             STATE.value = STATE.total
             render(time())
             n = length(STATE.worker_order)
-            n > 0 && print(stdout, repeat("[E[K", n), @sprintf("[%dF", n), "\r[K")
+            if STATE.rows
+                n > 0 && print(stdout, repeat("[E[K", n), @sprintf("[%dF", n), "\r\033[K")
+            end
             empty!(STATE.workers)
             empty!(STATE.worker_order)
             print(stdout, "\n")
@@ -214,7 +220,9 @@ function worker_bars_clear()
     (STATE.enabled && myid() == 1) || return nothing
     if STATE.tty && !isempty(STATE.workers)
         n = length(STATE.worker_order)
-        print(stdout, repeat("[E[K", n), @sprintf("[%dF", n))
+        if STATE.rows
+            print(stdout, repeat("[E[K", n), @sprintf("[%dF", n))
+        end
     end
     empty!(STATE.workers)
     empty!(STATE.worker_order)
@@ -235,6 +243,14 @@ function plog(msg::AbstractString)
         println(msg)
     end
     return nothing
+end
+
+function worker_summary()
+    isempty(STATE.workers) && return ""
+    parts = [@sprintf("w%d:%d%%", pid,
+                      round(Int, 100 * clamp(STATE.workers[pid].value / max(STATE.workers[pid].total, 1.0), 0.0, 1.0)))
+             for pid in STATE.worker_order]
+    return " · " * join(parts, " ")
 end
 
 function bar_line(now::Float64)
@@ -270,8 +286,8 @@ function render_worker_rows()
 end
 function render(now::Float64 = time())
     try
-        print(stdout, "\r\033[K", bar_line(now))
-        !isempty(STATE.worker_order) && render_worker_rows()
+        print(stdout, "\r\033[K", bar_line(now), worker_summary())
+        STATE.rows && !isempty(STATE.worker_order) && render_worker_rows()
         flush(stdout)
     catch
         progress_disable!()
