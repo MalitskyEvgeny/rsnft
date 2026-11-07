@@ -52,6 +52,7 @@ function parse_cli()
         "--picard-iters"  ; arg_type = Int; default = 3
         "--picard-tol"    ; arg_type = Float64; default = 1.0e-3
         "--pcg-tol"       ; arg_type = Float64; default = 1.0e-6; help = "PCG relative tolerance"
+    "--linear-solver" ; arg_type = Symbol; default = :pcg; help = "Линейный солвер шага: :pcg или :direct"
         "--max-f-calls"   ; arg_type = Int; default = -1; help = "bound NM by J-evaluations per epoch-level (-1 = dynamic: 2x nm-iterations; 0 = unbounded)"
         "--weight-ro-cal" ; default = "1"; help = "comma list: weight_ro calibration ladder (applied to the best stage-A theta)"
         "--adaptive-final"; action = :store_true; help = "control stage: evaluate criteria on the adaptive grid at the best theta"
@@ -114,7 +115,8 @@ function setup_inverse(args)
     cfg = SolverConfig(nx = nx, nz = nz, max_dt_ma = args["max-dt-ma"],
                        picard_iterations = args["picard-iters"],
                        picard_tolerance_c = args["picard-tol"],
-                       pcg_tolerance = args["pcg-tol"])
+                       pcg_tolerance = args["pcg-tol"],
+                       linear_solver = args["linear-solver"])
 
     # авто-воркеры: не больше стартов, чем воркеров — воркеров ровно по ансамблю
     # (иначе серийный fallback invert_ensemble и лишние воркеры простаивают в памяти)
@@ -148,6 +150,7 @@ function setup_inverse(args)
                              picard_iterations = args["picard-iters"],
                              picard_tolerance_c = args["picard-tol"],
                              pcg_tolerance = args["pcg-tol"],
+                             linear_solver = args["linear-solver"],
                              nodes_x = node_xs)
         end
     end
@@ -172,7 +175,8 @@ function setup_inverse(args)
     _WORKER_OBJ[] = obj      # BlackBoxOptim вызывает fitness и на главном
     return (args = args, nx = nx, nz = nz, out_dir = out_dir, t_start = t_start,
             data = data, wells = wells, layout = layout, cfg = cfg, obj = obj,
-            node_xs = node_xs, cache_dir = cache_dir, acfg = acfg)
+            node_xs = node_xs, cache_dir = cache_dir, acfg = acfg,
+            stage_times = OrderedDict{String,Float64}())
 end
 
 "7.1: ветка --c2f. Возвращает (results, best, c2f_stage, c2f_stages, cde)."
@@ -194,7 +198,8 @@ function mode_c2f(ctx)
         ccfg = SolverConfig(nx = cnx, nz = cnz, max_dt_ma = args["max-dt-ma"],
                             picard_iterations = args["picard-iters"],
                             picard_tolerance_c = args["picard-tol"],
-                            pcg_tolerance = args["pcg-tol"])
+                            pcg_tolerance = args["pcg-tol"],
+                            linear_solver = args["linear-solver"])
         cobj = make_objective(data, wells, ccfg, layout; reg = args["reg"],
                               weight_ro = args["weight-ro"],
                               cache_dir = joinpath(cache_dir, "c2f_coarse"))
@@ -220,7 +225,8 @@ function mode_c2f(ctx)
                                  max_dt_ma = args["max-dt-ma"],
                                  picard_iterations = args["picard-iters"],
                                  picard_tolerance_c = args["picard-tol"],
-                                 pcg_tolerance = args["pcg-tol"])
+                                 pcg_tolerance = args["pcg-tol"],
+                                 linear_solver = args["linear-solver"])
             end
             results, c2f_stages = invert_ensemble_c2f(cobj, obj;
                                                       ensemble = args["ensemble"],
@@ -260,6 +266,7 @@ function mode_c2f(ctx)
                                 max_dt_ma = args["max-dt-ma"],
                                 picard_iterations = args["picard-iters"],
                                 pcg_tolerance = args["pcg-tol"],
+                                linear_solver = args["linear-solver"],
                                 nodes_x = node_xs)
             end
             _WORKER_OBJ[] = cobj
@@ -290,6 +297,7 @@ function mode_c2f(ctx)
                                  picard_iterations = args["picard-iters"],
                                  picard_tolerance_c = args["picard-tol"],
                                  pcg_tolerance = args["pcg-tol"],
+                                 linear_solver = args["linear-solver"],
                                  nodes_x = node_xs)
             end
             _WORKER_OBJ[] = obj
@@ -364,22 +372,22 @@ function run_mode(ctx)
     args = ctx.args
     if args["c2f"]
         Progress.stage_set(1, 2, "coarse-to-fine inversion")
-        out = mode_c2f(ctx)
+        tm = time(); out = mode_c2f(ctx); ctx.stage_times["coarse-to-fine inversion"] = time() - tm
         Progress.stage_set(2, 2, "final forward & control")
         return out
     elseif !isempty(args["weight-ro-cal"]) && !isempty(args["theta0-file"])
         Progress.stage_set(1, 2, "weight_ro calibration ladder")
-        out = mode_weight_ro_cal(ctx)
+        tm = time(); out = mode_weight_ro_cal(ctx); ctx.stage_times["weight_ro calibration ladder"] = time() - tm
         Progress.stage_set(2, 2, "final forward & control")
         return out
     elseif !isempty(args["theta0-file"])
         Progress.stage_set(1, 2, "polish from theta0")
-        out = mode_theta0(ctx)
+        tm = time(); out = mode_theta0(ctx); ctx.stage_times["polish from theta0"] = time() - tm
         Progress.stage_set(2, 2, "final forward & control")
         return out
     else
         Progress.stage_set(1, 2, "DE inversion ensemble")
-        out = mode_plain(ctx)
+        tm = time(); out = mode_plain(ctx); ctx.stage_times["DE inversion ensemble"] = time() - tm
         Progress.stage_set(2, 2, "final forward & control")
         return out
     end
@@ -544,6 +552,20 @@ function print_summary(ctx, best, results, rep)
             fmt_or_na(rep.rmse_T), fmt_or_na(rep.rmse_Ro), fmt_or_na(100 * rep.frac_2s_T),
             fmt_or_na(100 * rep.frac_2s_Ro), fmt_or_na(rep.l2))
     println("SAVED ", ctx.out_dir)
+    println()
+    println("=== time summary ===")
+    @printf("total: %s
+", Progress.fmt_time_public(time() - ctx.t_start))
+    for (name, dt) in ctx.stage_times
+        @printf("  %-30s %s
+", name, Progress.fmt_time_public(dt))
+    end
+    fresh = [r.elapsed_s / max(r.de_evals + r.nm_evals, 1) for r in results if (r.de_evals + r.nm_evals) > 0]
+    if !isempty(fresh)
+        @printf("avg per J-eval (fresh, per start): %.2f s
+",
+                sum(fresh) / length(fresh))
+    end
 end
 
 function main()
@@ -568,7 +590,7 @@ function main()
     (obj.n_artifact_T[] > 0 || obj.n_artifact_Ro[] > 0) &&
         @warn "Артефактные выборки в лучшем прогоне" n_artifact_T = obj.n_artifact_T[] n_artifact_Ro = obj.n_artifact_Ro[]
     cache_save(obj; force = true)          # финальная запись кэша (2.2)
-    ff = final_forward(ctx, best)
+    tm = time(); ff = final_forward(ctx, best); ctx.stage_times["final forward & control"] = time() - tm
     build_solution(ctx, best, results, ff, c2f_info, cde)
     print_summary(ctx, best, results, ff.rep)
     return nothing

@@ -1030,6 +1030,12 @@ function main_adaptive(argv = ARGS)
     println(@sprintf("CELLS %d ACTIVE %d MIN_CELL %.3fx%.3f m",
                      length(mesh.cells), final_active, metadata["minimum_dx_m"], metadata["minimum_dz_m"]))
     println(@sprintf("T_FINAL %.3f %.3f C", minimum(finite), maximum(finite)))
+    nsteps = length(result.diagnostics)
+    @printf("TIME total %s | forward %s | %d steps, %.2f s/step
+",
+            Progress.fmt_time_public(result.elapsed_seconds),
+            Progress.fmt_time_public(result.elapsed_seconds), nsteps,
+            result.elapsed_seconds / max(nsteps, 1))
     unconverged_steps > 0 && println("WARNING NONLINEAR_NOT_CONVERGED $unconverged_steps time steps")
 end
 
