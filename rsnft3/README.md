@@ -79,10 +79,11 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 `-Grid/--grid`, `-DeBudget/--de-budget` (бюджет оптимизации), `-Threads/--threads`
 (Julia-потоки, 8). Полный список — `rsnft3/scripts/README.md`.
 
-Дефолты запуска через `run_inverse.jl` напрямую: `--grid 50,60 --ensemble 4
+Дефолты запуска через `run_inverse.jl` напрямую: `--grid 20,40 --ensemble 4
 --workers 0 (авто: по числу ансамблей) --de-budget 4000 --nm-iterations 200`. Лаунчеры `run_full`
-используют те же дефолты (de-budget 4000, NM 200, ensemble 3) с адаптивными сетками;
-дефолт сетки 20×40 задан флагом и меняется явно. Дополнительно: `--max-f-calls -1`
+используют дефолты эталонного прогона: равномерная сетка 30×60 (прямая и инверсия),
+`--de-budget 2000 --nm-iterations 200 --reg 0.3`, ансамбль и воркеры — авто по числу
+логических ядер; флаги `-Nx/-Nz/-Grid/--grid` и т.д. переопределяют. Дополнительно: `--max-f-calls -1`
 (динамический бюджет NM = 2 × nm-iterations × уровней; 0 = без лимита),
 `--q-true 75,80,85,90` (twin: таблица θ_true vs θ̂ в отчёте).
 
