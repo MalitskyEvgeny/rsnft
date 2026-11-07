@@ -61,9 +61,27 @@ function init()
         false
     end
     STATE.tty = tty
+    enable_vt_console()
     off_env = lowercase(get(ENV, "RSNFT_PROGRESS", "")) in ("off", "0", "no", "none")
     STATE.enabled = !off_env          # off=полное отключение; не-TTY -> вехи, TTY -> полоса
     return STATE.enabled
+end
+
+"Windows-консоль (PS5/cmd): включить ENABLE_VIRTUAL_TERMINAL_PROCESSING — без этого
+ESC-коды курсора (\e[1A/\e[1B) игнорируются и строки склеиваются в одну."
+function enable_vt_console()
+    Sys.iswindows() || return nothing
+    try
+        h = ccall((:GetStdHandle, :kernel32), Ptr{Cvoid}, (Int32,), -11)  # STD_OUTPUT_HANDLE
+        h == C_NULL && return nothing
+        mode = Ref{UInt32}(0)
+        ccall((:GetConsoleMode, :kernel32), Int32, (Ptr{Cvoid}, Ref{UInt32}), h, mode) == 0 || return nothing
+        mode[] |= 0x0004   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        ccall((:SetConsoleMode, :kernel32), Int32, (Ptr{Cvoid}, UInt32), h, mode[])
+    catch
+        # не консоль/неудача — продолжаем без VT (не критично)
+    end
+    return nothing
 end
 
 progress_enabled() = STATE.enabled
@@ -171,6 +189,7 @@ function worker_bar_update(pid::Int, value::Real, total::Real, caption::Abstract
     b = get!(STATE.workers, pid, Bar(Float64(total), Float64(value), String(caption), time()))
     if !(pid in STATE.worker_order)
         push!(STATE.worker_order, pid)
+        sort!(STATE.worker_order)          # стабильный порядок строк
     end
     b.value = Float64(value)
     b.total = Float64(total)
