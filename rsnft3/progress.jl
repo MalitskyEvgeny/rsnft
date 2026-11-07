@@ -24,6 +24,13 @@ const MILESTONE_MIN_INTERVAL = 10.0  # сек между вехами в не-TT
 const MILESTONE_MIN_STEP = 0.05   # мин доля прогресса между вехами
 const WIDTH = 20                  # ширина полосы в символах
 
+mutable struct Bar
+    total::Float64
+    value::Float64
+    caption::String
+    t0::Float64
+end
+
 mutable struct BarState
     enabled::Bool
     tty::Bool
@@ -39,9 +46,12 @@ mutable struct BarState
     last_render::Float64
     last_milestone::Float64
     last_milestone_value::Float64
+    workers::Dict{Int,Bar}          # per-worker bars (pid -> Bar)
+    worker_order::Vector{Int}       # stable row order
 end
 
-const STATE = BarState(false, false, 0, 0, "", false, 0.0, 0.0, "", "", 0.0, 0.0, 0.0, -1.0)
+const STATE = BarState(false, false, 0, 0, "", false, 0.0, 0.0, "", "", 0.0, 0.0, 0.0, -1.0,
+                      Dict{Int,Bar}(), Int[])
 
 "Инициализация по окружению: TTY stderr, env RSNFT_PROGRESS. Вызывать на старте main."
 function init()
@@ -119,19 +129,24 @@ end
 
 "Закрыть полосу: мгновенно дорисовать 100% и перевести строку."
 function bar_finish()
-    STATE.active = false
-    active() || return nothing
-    if STATE.tty
-        STATE.value = STATE.total
-        render(time())
-        print(stdout, "\n")
-    else
-        frac = STATE.total > 0 ? 1.0 : 0.0
-        STATE.last_milestone_value = frac
-        STATE.last_milestone = time()
-        println(stdout, @sprintf("[100%%] %s done · %s elapsed", STATE.caption,
-                                 fmt_time(time() - STATE.t0)))
+    if active()
+        if STATE.tty
+            STATE.value = STATE.total
+            render(time())
+            n = length(STATE.worker_order)
+            n > 0 && print(stdout, repeat("[1B[K", n), repeat("[1A", n), "\r[K")
+            empty!(STATE.workers)
+            empty!(STATE.worker_order)
+            print(stdout, "\n")
+        else
+            frac = STATE.total > 0 ? 1.0 : 0.0
+            STATE.last_milestone_value = frac
+            STATE.last_milestone = time()
+            println(stdout, @sprintf("[100%%] %s done · %s elapsed", STATE.caption,
+                                     fmt_time(time() - STATE.t0)))
+        end
     end
+    STATE.active = false
     return nothing
 end
 
@@ -147,6 +162,43 @@ function step_note(caption::AbstractString)
     else
         println(stdout, "  Step: $(STATE.note)")
     end
+    return nothing
+end
+
+"Бар одного воркера: создаётся при первом рапорте."
+function worker_bar_update(pid::Int, value::Real, total::Real, caption::AbstractString)
+    (STATE.enabled && myid() == 1) || return nothing
+    b = get!(STATE.workers, pid, Bar(Float64(total), Float64(value), String(caption), time()))
+    if !(pid in STATE.worker_order)
+        push!(STATE.worker_order, pid)
+    end
+    b.value = Float64(value)
+    b.total = Float64(total)
+    b.caption = String(caption)
+    STATE.tty && render_all()
+    return nothing
+end
+
+"Воркер завершил старт: бар заполняется и метится done."
+function worker_bar_done(pid::Int)
+    (STATE.enabled && myid() == 1) || return nothing
+    haskey(STATE.workers, pid) || return nothing
+    b = STATE.workers[pid]
+    b.value = b.total
+    b.caption = b.caption * " · done"
+    STATE.tty && render_all()
+    return nothing
+end
+
+"Сброс воркер-баров перед новой стадии ансамбля."
+function worker_bars_clear()
+    (STATE.enabled && myid() == 1) || return nothing
+    if STATE.tty && !isempty(STATE.workers)
+        n = length(STATE.worker_order)
+        print(stdout, repeat("[1B[K", n), repeat("[1A", n))
+    end
+    empty!(STATE.workers)
+    empty!(STATE.worker_order)
     return nothing
 end
 
@@ -178,9 +230,50 @@ function bar_line(now::Float64)
                     fmt_time(elapsed), eta, extra)
 end
 
+const CSI_CLEAR = "\r[K"
+
+"Рисование всех воркер-баров (одна строка на воркер), без перемещения курсора."
+function render_all()
+    try
+        print(stdout, CSI_CLEAR)
+        for pid in STATE.worker_order
+            b = STATE.workers[pid]
+            frac = b.total > 0 ? clamp(b.value / b.total, 0.0, 1.0) : 0.0
+            filled = round(Int, frac * WIDTH)
+            bar = repeat("█", filled) * repeat("░", WIDTH - filled)
+            el = b.t0 > 0 ? time() - b.t0 : 0.0
+            print(stdout, @sprintf("  worker %-2d [%s] %3d%% · %s · %s", 
+                                   pid, bar, round(Int, frac * 100), b.caption, fmt_time(el)))
+        end
+        flush(stdout)
+    catch
+        progress_disable!()
+    end
+    return nothing
+end
+
+
+"Строки воркеров под главной: cursor-down + clear, без 
+ (один блок с главной строкой)."
+function render_worker_rows()
+    n = length(STATE.worker_order)
+    n == 0 && return nothing
+    for pid in STATE.worker_order
+        b = STATE.workers[pid]
+        frac = b.total > 0 ? clamp(b.value / b.total, 0.0, 1.0) : 0.0
+        filled = round(Int, frac * WIDTH)
+        bar = repeat("█", filled) * repeat("░", WIDTH - filled)
+        el = b.t0 > 0 ? time() - b.t0 : 0.0
+        print(stdout, "[1B[K", @sprintf("  worker %-2d [%s] %3d%% · %s · %s", 
+                               pid, bar, round(Int, frac * 100), b.caption, fmt_time(el)))
+    end
+    print(stdout, repeat("[1A", n))
+    return nothing
+end
 function render(now::Float64 = time())
     try
         print(stdout, "\r\033[K", bar_line(now))
+        !isempty(STATE.worker_order) && render_worker_rows()
         flush(stdout)
     catch
         progress_disable!()

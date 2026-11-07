@@ -85,13 +85,15 @@ function worker_init_c2f!(data_dir::AbstractString, wells::WellSet,
                           reg::Real = 1.0, weight_ro::Real = 1.0,
                           max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
                           picard_tolerance_c::Real = 1.0e-3,
-                          pcg_tolerance::Real = 1.0e-6)
+                          pcg_tolerance::Real = 1.0e-6,
+                          linear_solver::Symbol = :pcg)
     data = load_dataset_derived(data_dir, Workbook())
     layout = make_q_layout(data; epochs = epochs, n_nodes = n_nodes, mid_x = mid_x,
                            nodes_x = nodes_x)
     common = (max_dt_ma = Float64(max_dt_ma), picard_iterations = picard_iterations,
               picard_tolerance_c = Float64(picard_tolerance_c),
-              pcg_tolerance = Float64(pcg_tolerance))
+              pcg_tolerance = Float64(pcg_tolerance),
+              linear_solver = linear_solver)
     ccfg = SolverConfig(nx = coarse_nx, nz = coarse_nz; common...)
     fcfg = SolverConfig(nx = fine_nx, nz = fine_nz; common...)
     _WORKER_OBJ_COARSE[] = make_objective(data, wells, ccfg, layout;
@@ -287,7 +289,8 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
     # живой DE-прогресс с воркеров: колбэк de_search кладёт (pid, f_calls, J),
     # читатель на главном двигает полосу; сумма по всем стартам = ensemble·budget
     chan = RemoteChannel(() -> Channel{Tuple{Int,Int,Float64}}(64))
-    nm_soft = ensemble * (max_f_calls > 0 ? max_f_calls : 2 * nm_iterations * 4)
+    nm_soft_per = max_f_calls > 0 ? max_f_calls : 2 * nm_iterations * 4
+    nm_soft = ensemble * nm_soft_per
     Progress.bar_start(ensemble * de_budget + nm_soft, "DE + NM polish (ensemble)")
     last_fe = Dict{Int,Int}()
     reader = @async begin
@@ -298,6 +301,11 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
             phase = msg[2] <= de_budget ? "DE search" : "NM polish"
             Progress.bar_add(delta, @sprintf("%s · worker %d · eval %d/%d · best J=%.1f",
                                              phase, msg[1], msg[2], de_budget, msg[3]))
+            Progress.worker_bar_update(msg[1], min(msg[2], de_budget + nm_soft_per),
+                                       de_budget + nm_soft_per,
+                                       @sprintf("%s · eval %d/%d · best J=%.1f",
+                                                phase, min(msg[2], de_budget + nm_soft_per),
+                                                de_budget + nm_soft_per, msg[3]))
         end
         Progress.bar_finish()
     end
@@ -324,6 +332,7 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
         for w in done_ws
             push!(idle, w)
             delete!(busy, w)
+            Progress.worker_bar_done(w)
         end
         Progress.step_note(@sprintf("ensemble starts: %d/%d done", done_count, ensemble))
     end
@@ -376,6 +385,7 @@ function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{T
                       reg::Real = 1.0, weight_ro::Real = 1.0, cache_dir::AbstractString = "",
                       max_dt_ma::Real = 2.5, picard_iterations::Int = 3,
                       picard_tolerance_c::Real = 1.0e-3, pcg_tolerance::Real = 1.0e-6,
+                      linear_solver::Symbol = :pcg,
                       nodes_x::Union{Nothing,Vector{Float64}} = nothing)
     global INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT
     INV_DATA = load_dataset_derived(data_dir, Workbook())
@@ -385,7 +395,8 @@ function worker_init!(data_dir::AbstractString, wells::WellSet, epochs::Vector{T
     INV_CFG = SolverConfig(nx = nx, nz = nz, max_dt_ma = Float64(max_dt_ma),
                            picard_iterations = picard_iterations,
                            picard_tolerance_c = Float64(picard_tolerance_c),
-                           pcg_tolerance = Float64(pcg_tolerance))
+                           pcg_tolerance = Float64(pcg_tolerance),
+                           linear_solver = linear_solver)
     worker_setup(INV_DATA, INV_WELLS, INV_CFG, INV_LAYOUT;
                  reg = reg, weight_ro = weight_ro, cache_dir = cache_dir)
     return myid()
@@ -499,7 +510,8 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
     next_start = 1
     # # живой прогресс стадии A (coarse DE) с воркеров
     chan = RemoteChannel(() -> Channel{Tuple{Int,Int,Float64}}(64))
-    nm_soft = ensemble * (max_f_calls > 0 ? max_f_calls : 2 * nm_iterations * 4)
+    nm_soft_per = max_f_calls > 0 ? max_f_calls : 2 * nm_iterations * 4
+    nm_soft = ensemble * nm_soft_per
     Progress.bar_start(ensemble * de_budget + nm_soft, "DE + NM polish (c2f coarse ensemble)")
     last_fe = Dict{Int,Int}()
     reader = @async begin
@@ -510,6 +522,11 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
             phase = msg[2] <= de_budget ? "DE search (coarse)" : "NM polish (coarse)"
             Progress.bar_add(delta, @sprintf("%s · worker %d · eval %d/%d · best J=%.1f",
                                              phase, msg[1], msg[2], de_budget, msg[3]))
+            Progress.worker_bar_update(msg[1], min(msg[2], de_budget + nm_soft_per),
+                                       de_budget + nm_soft_per,
+                                       @sprintf("%s · eval %d/%d · best J=%.1f",
+                                                phase, min(msg[2], de_budget + nm_soft_per),
+                                                de_budget + nm_soft_per, msg[3]))
         end
         Progress.bar_finish()
     end
@@ -534,6 +551,7 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
         for w in done_ws
             push!(idle, w)
             delete!(busy, w)
+            Progress.worker_bar_done(w)
         end
     end
     pairs = [fetch(f) for f in futures]
