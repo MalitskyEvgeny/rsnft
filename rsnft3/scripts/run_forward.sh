@@ -28,6 +28,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R3="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$R3/.." && pwd)"
 JULIA=${JULIA:-julia}
+# Флаги производительности: максимум оптимизации и отказ от проверок границ
+# (индексы везде @inbounds). Отключается переменной RSNFT_SAFE=1.
+if [[ "${RSNFT_SAFE:-0}" != "1" ]]; then
+    JULIA_PERF_FLAGS="-O3 --check-bounds=no"
+else
+    JULIA_PERF_FLAGS=""
+fi
 THREADS=8
 
 DATA_DIR=""
@@ -94,13 +101,13 @@ else
 fi
 [[ $FORCE -eq 1 ]] && SOLVER_ARGS+=(--force)
 
-RUN_LINE="$("$JULIA" --project="$R3" -t "$THREADS" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
+RUN_LINE="$("$JULIA" --project="$R3" $JULIA_PERF_FLAGS -t "$THREADS" "$SOLVER" "${SOLVER_ARGS[@]}" | tee /dev/stderr | grep -E '^(RUN|CACHE_HIT)' | tail -1)"
 RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d ':')"
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
 
 echo "=== Stage 2/2: report ==="
-"$JULIA" --project="$R3" "$R3/report_full.jl" --direct "$RUN_DIR" --out "$OUT_DIR/report.html"
+"$JULIA" --project="$R3" $JULIA_PERF_FLAGS "$R3/report_full.jl" --direct "$RUN_DIR" --out "$OUT_DIR/report.html"
 
 echo "=== summary ==="
 echo "report   : $OUT_DIR/report.html"
