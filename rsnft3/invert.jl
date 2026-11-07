@@ -299,8 +299,9 @@ function invert_ensemble_parallel(obj::Objective; ensemble::Int = 4, de_budget::
             delta = msg[2] - get(last_fe, msg[1], 0)
             last_fe[msg[1]] = msg[2]
             phase = msg[2] <= de_budget ? "DE search" : "NM polish"
-            Progress.bar_add(delta, @sprintf("%s · worker %d · eval %d/%d · best J=%.1f",
-                                             phase, msg[1], msg[2], de_budget, msg[3]))
+            tot_fe = sum(values(last_fe))
+            Progress.bar_add(delta, @sprintf("eval %d/%d · best J=%.1f",
+                                             tot_fe, ensemble * de_budget + nm_soft, msg[3]))
             Progress.worker_bar_update(msg[1], min(msg[2], de_budget + nm_soft_per),
                                        de_budget + nm_soft_per,
                                        @sprintf("%s · eval %d/%d · best J=%.1f",
@@ -520,8 +521,9 @@ function invert_ensemble_c2f(obj_coarse::Objective, obj_fine::Objective;
             delta = msg[2] - get(last_fe, msg[1], 0)
             last_fe[msg[1]] = msg[2]
             phase = msg[2] <= de_budget ? "DE search (coarse)" : "NM polish (coarse)"
-            Progress.bar_add(delta, @sprintf("%s · worker %d · eval %d/%d · best J=%.1f",
-                                             phase, msg[1], msg[2], de_budget, msg[3]))
+            tot_fe = sum(values(last_fe))
+            Progress.bar_add(delta, @sprintf("eval %d/%d · best J=%.1f",
+                                             tot_fe, ensemble * de_budget + nm_soft, msg[3]))
             Progress.worker_bar_update(msg[1], min(msg[2], de_budget + nm_soft_per),
                                        de_budget + nm_soft_per,
                                        @sprintf("%s · eval %d/%d · best J=%.1f",

@@ -200,7 +200,8 @@ function worker_bar_update(pid::Int, value::Real, total::Real, caption::Abstract
     b.value = Float64(value)
     b.total = Float64(total)
     b.caption = String(caption)
-    STATE.tty && render()
+    # троттлинг: воркеры шлют часто, перерисовка не чаще MIN_INTERVAL
+    STATE.tty && time() - STATE.last_render >= MIN_INTERVAL && render()
     return nothing
 end
 
@@ -286,7 +287,13 @@ function render_worker_rows()
 end
 function render(now::Float64 = time())
     try
-        print(stdout, "\r\033[K", bar_line(now), worker_summary())
+        line = bar_line(now)
+        suml = worker_summary()
+        cols = try displaysize(stdout)[2] - 1 catch; typemax(Int) end
+        if length(line) + length(suml) <= cols
+            line = line * suml
+        end
+        print(stdout, "[K", first(line, cols))
         STATE.rows && !isempty(STATE.worker_order) && render_worker_rows()
         flush(stdout)
     catch
