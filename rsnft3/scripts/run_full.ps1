@@ -80,6 +80,13 @@ if (-not $Wells) {
 }
 if ($Theta0File -and -not (Test-Path $Theta0File)) { throw "theta0-file not found: $Theta0File" }
 
+# Ранние диагностируемые проверки вместо молчаливого "solver did not report a run id"
+if (-not (Get-Command $JuliaExe -ErrorAction SilentlyContinue)) {
+    throw "Julia not found: '$JuliaExe'. Install Julia 1.9+ or set JULIA env var"
+}
+if (-not (Test-Path $DataDir))    { throw "data dir not found: $DataDir (unzip data folders next to rsnft3 or pass -DataDir)" }
+if (-not (Test-Path $InvDataDir)) { throw "inverse data dir not found: $InvDataDir (pass -InvDataDir)" }
+
 $TS = Get-Date -Format "yyyyMMdd_HHmmss"
 if (-not $Out) { $Out = Join-Path $RepoRoot "results\report_full_$TS" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
@@ -102,7 +109,11 @@ $ErrorActionPreference = "Continue"
 $SolverOut = & $JuliaExe "--project=$R3" "-t" "$Threads" $SolverScript @SolverArgs 2>&1 | Tee-Object -Variable AllOut
 $ErrorActionPreference = "Stop"
 $RunLine = ($AllOut | Select-String -Pattern "^(RUN|CACHE_HIT)" | Select-Object -Last 1)
-if (-not $RunLine) { throw "solver did not report a run id" }
+if (-not $RunLine) {
+    Write-Host "=== solver output (failure diagnostics) ===" -ForegroundColor Yellow
+    $AllOut | ForEach-Object { Write-Host $_ }
+    throw "solver did not report a run id"
+}
 $RunId = (($RunLine.ToString() -replace '[^\w\s]', ' ') -split '\s+' |
           Where-Object { $_ -match '^[0-9a-fA-F]{8,}$' } | Select-Object -First 1)
 if (-not $RunId) { throw "could not parse run id from: $($RunLine.ToString())" }
