@@ -31,6 +31,17 @@
   - `Данные для обратной задачи/` — скважинные данные
     (`TemperatureWellData.xlsx`, `VitriniteWellData.xlsx`, …).
 
+## Стадии `run_full`
+1. Прямая задача (uniform или adaptive), 2. Инверсия (с `--q-scalar` по
+умолчанию), 3. HTML-отчёт, 4. Выгрузка результатов в XLSX в формате
+эталона (`Temperature.xlsx`, `Sweeney_Burnham_1990_EASY_Ro.xlsx`) —
+`<run>/xlsx/` и `inverse/xlsx/`.
+
+## Требование версии
+`Manifest.toml` зафиксирован для Julia 1.13.0; скрипты проверяют
+`julia --version` и завершаются с ошибкой, если версия ниже 1.13
+(можно переопределить бинарник переменной `JULIA=/путь/к/julia`).
+
 Если папки лежат в другом месте — передайте их флагами (`--data-dir`,
 `--inv-data-dir`, `--wells`), ничего перемещать не нужно.
 

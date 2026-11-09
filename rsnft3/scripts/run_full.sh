@@ -38,6 +38,21 @@ R3="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$R3/.." && pwd)"
 JULIA=${JULIA:-julia}
 
+# Требование версии: Manifest зафиксирован для Julia 1.13.0 (проверено на 1.13.0).
+require_julia_version() {
+    local v vnum best
+    v="$("$JULIA" --version 2>/dev/null)" || { echo "ERROR: Julia not found: $JULIA" >&2; exit 1; }
+    vnum="${v#julia version }"
+    best="$(printf '%s
+1.13.0
+' "$vnum" | sort -V | tail -1)"
+    if [[ "$best" != "$vnum" ]]; then
+        echo "ERROR: требуется Julia >= 1.13 (Manifest зафиксирован для 1.13.0); найдено: $v" >&2
+        exit 1
+    fi
+}
+require_julia_version
+
 DATA_DIR=""
 INV_DATA_DIR=""
 WELLS=""
@@ -62,6 +77,7 @@ SIGMA_RO=0.05
 REG=0.3
 NODE_XS=""
 EPOCHS=""
+Q_SCALAR=1          # по умолчанию: скалярный монотонный q(t) (условие судей)
 SEED=1
 THETA0=""
 OUT=""
@@ -110,6 +126,8 @@ while [[ $# -gt 0 ]]; do
         --reg)           REG="$2"; shift 2 ;;
         --node-xs)       NODE_XS="$2"; shift 2 ;;
         --epochs)        EPOCHS="$2"; shift 2 ;;
+        --q-scalar)      Q_SCALAR=1; shift ;;
+        --no-q-scalar)   Q_SCALAR=0; shift ;;
         --seed)          SEED="$2"; shift 2 ;;
         --theta0-file)   THETA0="$2"; shift 2 ;;
         --out)           OUT="$2"; shift 2 ;;
@@ -138,12 +156,12 @@ OUT_DIR="$(to_julia_path "$OUT_DIR")"
 
 SOLVER="$R3/adaptive_basin_fvm.jl"
 if [[ $UNIFORM -eq 1 ]]; then
-    echo "=== Stage 1/3: forward solve (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
+    echo "=== Stage 1/4: forward solve (uniform): $(basename "$DATA_DIR"), grid ${NX}x${NZ} ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --nx "$NX" --nz "$NZ")
     SOLVER="$R3/basin_fvm.jl"
 else
-    echo "=== Stage 1/3: forward solve (adaptive): $(basename "$DATA_DIR"), base $BASE, level $LEVEL ==="
+    echo "=== Stage 1/4: forward solve (adaptive): $(basename "$DATA_DIR"), base $BASE, level $LEVEL ==="
     SOLVER_ARGS=(--data-dir "$DATA_DIR" --cache-dir "$CACHE_DIR"
                  --base-nx "${BASE%,*}" --base-nz "${BASE#*,}"
                  --max-level "$LEVEL")
@@ -155,7 +173,7 @@ RUN_ID="$(printf '%s' "$RUN_LINE" | tr -d '[:cntrl:]' | awk '{print $2}' | tr -d
 RUN_DIR="$(to_julia_path "$REPO_ROOT/results/$RUN_ID")"
 echo "run dir: $RUN_DIR"
 
-echo "=== Stage 2/3: inversion (wells: $WELLS) ==="
+echo "=== Stage 2/4: inversion (wells: $WELLS) ==="
 INVERSE_ARGS=(--data-dir "$INV_DATA_DIR" --wells "$WELLS" --grid "$GRID"
               --ensemble "$ENSEMBLE" --workers "$WORKERS"
               --de-budget "$DE_BUDGET" --nm-iterations "$NM_ITERATIONS"
@@ -178,16 +196,20 @@ fi
 [[ -n "$NODE_XS" ]] && INVERSE_ARGS+=(--node-xs "$NODE_XS")
 [[ -n "$EPOCHS" ]] && INVERSE_ARGS+=(--epochs "$EPOCHS")
 [[ $TWIN -eq 1 ]] && INVERSE_ARGS+=(--q-true "$TWIN_Q")
+[[ $Q_SCALAR -eq 1 ]] && INVERSE_ARGS+=(--q-scalar)
 [[ -n "$THETA0" ]] && INVERSE_ARGS+=(--theta0-file "$THETA0")
 
 "$JULIA" --project="$R3" -t "$THREADS" "$R3/run_inverse.jl" "${INVERSE_ARGS[@]}"
 
-echo "=== Stage 3/3: report ==="
+echo "=== Stage 3/4: report ==="
 "$JULIA" --project="$R3" -t "$THREADS" "$R3/report_full.jl" \
     --direct "$RUN_DIR" --inverse "$OUT_DIR/inverse" --out "$OUT_DIR/report.html"
 
+echo "=== Stage 4/4: xlsx export ==="
+"$JULIA" --project="$R3" -t "$THREADS" "$R3/export_xlsx.jl"     --run "$RUN_DIR" --data-dir "$DATA_DIR"     --inverse "$OUT_DIR/inverse" --inv-data-dir "$INV_DATA_DIR"
 echo "=== summary ==="
 echo "report   : $OUT_DIR/report.html"
+echo "xlsx     : $RUN_DIR/xlsx and $OUT_DIR/inverse/xlsx"
 echo "forward  : $RUN_DIR"
 echo "inverse  : $OUT_DIR/inverse"
 [[ $OPEN -eq 1 ]] && (xdg-open "$OUT_DIR/report.html" >/dev/null 2>&1 ||

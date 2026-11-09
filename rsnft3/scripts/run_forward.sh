@@ -28,6 +28,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R3="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$R3/.." && pwd)"
 JULIA=${JULIA:-julia}
+
+# Требование версии: Manifest зафиксирован для Julia 1.13.0 (проверено на 1.13.0).
+require_julia_version() {
+    local v vnum best
+    v="$("$JULIA" --version 2>/dev/null)" || { echo "ERROR: Julia not found: $JULIA" >&2; exit 1; }
+    vnum="${v#julia version }"
+    best="$(printf '%s
+1.13.0
+' "$vnum" | sort -V | tail -1)"
+    if [[ "$best" != "$vnum" ]]; then
+        echo "ERROR: требуется Julia >= 1.13 (Manifest зафиксирован для 1.13.0); найдено: $v" >&2
+        exit 1
+    fi
+}
+require_julia_version
 # Флаги производительности: максимум оптимизации и отказ от проверок границ
 # (индексы везде @inbounds). Отключается переменной RSNFT_SAFE=1.
 if [[ "${RSNFT_SAFE:-0}" != "1" ]]; then

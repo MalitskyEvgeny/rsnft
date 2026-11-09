@@ -81,6 +81,7 @@ struct Objective
     geometry::Any                          # ForwardGeometry | AdaptiveGeometry
     backend::Symbol                        # :regular | :adaptive
     adaptive_cfg::Union{Nothing,AdaptiveConfig}
+    theta_map::Function                    # δ → θ (монотонный скалярный режим) | identity
 end
 
 "Маска активных ячеек (nz, nx): ячейка накрыта хотя бы одним слоем на age 0."
@@ -218,7 +219,8 @@ function make_objective(data::BasinDataset, wells::WellSet, cfg::SolverConfig, l
     return Objective(data, cfg, layout, Float64(reg), Float64(weight_ro),
                      t_targets, ro_targets, n_dropped, Ref(0), Ref(0),
                      cache, cache_path, bytes2hex(sha256(JSON.json(ctx)))[1:16], Ref(0),
-                     Ref(0), geometry, backend, backend === :adaptive ? adaptive_cfg : nothing)
+                     Ref(0), geometry, backend, backend === :adaptive ? adaptive_cfg : nothing,
+                     layout.monotone ? (ue -> theta_expand_mono(layout, ue)) : identity)
 end
 
 "θ → qbasal (Вт/м²) на x-сетке прогона для каждого возраста; эквивалент
@@ -265,8 +267,11 @@ function cache_save(obj::Objective; force::Bool = false)
     obj._dirty[] = 0
 end
 
-"Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info)."
+"Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info).
+Монотонный скалярный режим: θ здесь — δ; он сначала разворачивается
+в реальные q (theta_map), кэш-ключ — по δ."
 function evaluate(obj::Objective, θ::AbstractVector{<:Real})
+    θ = obj.theta_map(θ)
     key = cache_key(θ, obj.ctx_hash)
     if haskey(obj.cache, key)
         v = obj.cache[key]

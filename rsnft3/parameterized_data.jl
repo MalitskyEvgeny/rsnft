@@ -80,7 +80,10 @@ struct ThetaLayout
     x0::Vector{Float64}
     epochs::Vector{Tuple{Float64,Float64}}   # (старая Ma, молодая Ma)
     nodes_x::Vector{Float64}                 # X-узлы q, включая границы профиля
+    monotone::Bool                           # скалярный режим: оптимизируется δ, не q
 end
+ThetaLayout(names, lower, upper, x0, epochs, nodes_x) =
+    ThetaLayout(names, lower, upper, x0, epochs, nodes_x, false)
 
 Base.length(l::ThetaLayout) = length(l.names)
 
@@ -115,12 +118,14 @@ function make_q_layout(data;
         ns[1] == xmin || pushfirst!(ns, xmin)
         ns[end] == xmax || push!(ns, xmax)
         ns
+    elseif n_nodes == 1
+        [xmin]
     elseif n_nodes == 2
         [xmin, xmax]
     elseif n_nodes == 3
         [xmin, clamp(mid_x, xmin, xmax), xmax]
     else
-        error("n_nodes must be 2 or 3 (or pass nodes_x)")
+        error("n_nodes must be 1, 2 or 3 (or pass nodes_x)")
     end
     names = String[]; lower = Float64[]; upper = Float64[]; x0 = Float64[]
     for epoch in epochs
@@ -139,6 +144,62 @@ function theta_constant(layout::ThetaLayout, epoch_q::Vector{Float64})
         error("expected $(length(layout.epochs)) epoch values")
     nn = length(layout.nodes_x)
     return [epoch_q[ie] for ie in eachindex(layout.epochs) for _ in 1:nn]
+end
+
+# ----------------------------------------------------------------------------
+# Монотонный скалярный q(t) (--q-scalar): жёсткое ограничение через
+# репараметризацию. Эпохи от старой к молодой; оптимизируемые переменные
+# δ = [q_1, δ_2, …, δ_ne], где q_1 — q самой старой эпохи, а
+# q_e = q_1 − Σ_{k<e} (softplus(δ_k) − ln2) → q невозрастающий ко времени
+# при любых δ. δ = 0 → константный q.
+const SOFTPLUS_LN2 = log(2.0)
+softplus_stable(x::Real) = x > 30 ? Float64(x) : log1p(exp(Float64(x)))
+"δ (скалярный монотонный) → значения q по эпохам [мВт/м²]."
+function theta_monotone_qs(ue::AbstractVector{<:Real})
+    ne = length(ue)
+    ne >= 1 || error("empty theta")
+    qs = Vector{Float64}(undef, ne)
+    qs[1] = Float64(ue[1])
+    for e in 2:ne
+        qs[e] = qs[e-1] - (softplus_stable(ue[e]) - SOFTPLUS_LN2)
+    end
+    return qs
+end
+"δ → θ в координатах layout (эпохи × узлы; скалярный режим: 1 узел)."
+function theta_expand_mono(layout::ThetaLayout, ue::AbstractVector{<:Real})
+    layout.monotone || error("theta_expand_mono: layout is not monotone")
+    nn = length(layout.nodes_x)
+    nn == 1 || error("monotone layout expects a single X-node")
+    qs = theta_monotone_qs(ue)
+    return [qs[ie] for ie in eachindex(layout.epochs) for _ in 1:nn]
+end
+"θ с реальными q по эпохам → δ (обратная задача для warm-start)."
+function theta_to_delta(qs::AbstractVector{<:Real})
+    ne = length(qs)
+    ue = Vector{Float64}(undef, ne)
+    ue[1] = Float64(qs[1])
+    for e in 2:ne
+        d = Float64(qs[e-1]) - Float64(qs[e])      # падение за эпоху ≥ 0
+        ue[e] = log(expm1(d + SOFTPLUS_LN2))       # softplus⁻¹(d + ln2)
+    end
+    return ue
+end
+"""
+    make_mono_scalar_layout(base) -> ThetaLayout
+Скалярный монотонный режим: 1 X-узел, оптимизация в δ-координатах.
+Бокс q_1 — из base (30–120 по умолчанию); бокс δ — [0, delta_max] —
+падение за эпоху до delta_max мВт/м² (с запасом для наблюдаемых изменений).
+"""
+function make_mono_scalar_layout(base::ThetaLayout)
+    xmin = base.nodes_x[1]
+    qlo, qhi = base.lower[1], base.upper[1]
+    delta_max = 60.0
+    ne = length(base.epochs)
+    names = [q_param_name(base.epochs[ie], xmin) for ie in 1:ne]
+    lower = [qlo, fill(0.0, ne - 1)...]
+    upper = [qhi, fill(delta_max, ne - 1)...]
+    x0 = [base.x0[1], fill(0.0, ne - 1)...]      # δ=0 → константный q
+    return ThetaLayout(names, lower, upper, x0, base.epochs, [xmin], true)
 end
 
 "Разности θ по соседним эпохам и соседним X-узлам (для регуляризации B3)."

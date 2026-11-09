@@ -42,6 +42,14 @@ $R3 = Resolve-Path (Join-Path $ScriptDir "..")
 $RepoRoot = Resolve-Path (Join-Path $R3 "..")
 $JuliaExe = if ($env:JULIA) { $env:JULIA } else { "julia" }
 
+# Требование версии: Manifest зафиксирован для Julia 1.13.0 (проверено на 1.13.0).
+$JuliaVerOut = & $JuliaExe --version 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $JuliaVerOut) { throw "Julia not found: '$JuliaExe'." }
+$JuliaVer = ("$JuliaVerOut" -replace '^julia version ', '').Trim()
+if ([version]$JuliaVer -lt [version]"1.13.0") {
+    throw ("Требуется Julia >= 1.13 (Manifest зафиксирован для 1.13.0); найдено: {0}" -f $JuliaVer)
+}
+
 # "Данные_для_прямой_задачи" посимвольно, чтобы не зависеть от кодировки файла
 $DirectName = -join [char[]](0x0414,0x0430,0x043D,0x043D,0x044B,0x0435,0x005F,
     0x0434,0x043B,0x044F,0x005F,0x043F,0x0440,0x044F,0x043C,0x043E,0x0439,

@@ -41,6 +41,7 @@ function parse_cli()
         "--reg"           ; arg_type = Float64; default = 1.0
         "--weight-ro"     ; arg_type = Float64; default = 1.0
         "--n-nodes"       ; arg_type = Int; default = 3; help = "X-nodes of q: 2 or 3"
+        "--q-scalar"      ; action = :store_true; help = "scalar q(t): lateral-constant and monotonically non-increasing in time (hard constraint via delta reparameterization); ignores --n-nodes/--node-xs"
         "--mid-x"         ; arg_type = Float64; default = 23400.0
         "--node-xs"       ; default = ""; help = "comma X-nodes of q in meters, e.g. 0,7000,23400,40000 (overrides --n-nodes/--mid-x)"
         "--epochs"        ; default = "200-100,100-35,35-10,10-0"
@@ -109,9 +110,19 @@ function setup_inverse(args)
     wells = load_wells_multi(args["wells"], data; sigma_T = args["sigma-T"], sigma_Ro = args["sigma-Ro"])
     node_xs = isempty(args["node-xs"]) ? nothing :
               Float64.(parse.(Float64, split(args["node-xs"], ",")))
+    if args["q-scalar"]
+        (isempty(args["node-xs"]) && args["n-nodes"] == 3) ||
+            @warn "--q-scalar: --n-nodes/--node-xs ignored (scalar q uses a single X-node)"
+        node_xs = nothing
+    end
     layout = make_q_layout(data; epochs = parse_epochs(args["epochs"]),
-                           n_nodes = args["n-nodes"], mid_x = args["mid-x"],
+                           n_nodes = args["q-scalar"] ? 1 : args["n-nodes"], mid_x = args["mid-x"],
                            nodes_x = node_xs)
+    args["q-scalar"] && (layout = make_mono_scalar_layout(layout))
+    # J_reg (d_epoch) built for lateral-variational theta; in scalar mode it only
+    # resists the required monotone change — disabled
+    reg_eff = args["q-scalar"] ? 0.0 : args["reg"]
+    reg_eff = args["q-scalar"] ? 0.0 : args["reg"]
     cfg = SolverConfig(nx = nx, nz = nz, max_dt_ma = args["max-dt-ma"],
                        picard_iterations = args["picard-iters"],
                        picard_tolerance_c = args["picard-tol"],
@@ -132,9 +143,15 @@ function setup_inverse(args)
     # воркеры: каждый со своим датасетом и кэшем
     if args["workers"] > 1 && nprocs() == 1
         addprocs(args["workers"] - 1)
+        # Julia 1.12+ strict world age: @everywhere include(...) с интерполяцией
+        # из тела функции сериализует замыкание, которое на воркере не
+        # десериализуется (UndefVarError в последующих remotecall).
+        # remotecall_fetch(include, ...) сериализует только путь — без замыканий.
         for f in ("parameterized_data.jl", "ro_kinetics.jl", "observations.jl",
                   "objective.jl", "criteria.jl", "progress.jl", "invert.jl")
-            @everywhere include(joinpath($(@__DIR__), $f))
+            for w in workers()
+                remotecall_fetch(include, w, joinpath(@__DIR__, f))
+            end
         end
         for pr in procs()
             remotecall_fetch(LinearAlgebra.BLAS.set_num_threads, pr, 1)
@@ -144,14 +161,15 @@ function setup_inverse(args)
         for w in workers()
             remotecall_fetch(worker_init!, w, data_dir_abs, wells, epochs,
                              args["n-nodes"], args["mid-x"], nx, nz;
-                             reg = args["reg"], weight_ro = args["weight-ro"],
+                             reg = reg_eff, weight_ro = args["weight-ro"],
                              cache_dir = joinpath(out_dir, "cache_w$w"),
                              max_dt_ma = args["max-dt-ma"],
                              picard_iterations = args["picard-iters"],
                              picard_tolerance_c = args["picard-tol"],
                              pcg_tolerance = args["pcg-tol"],
                              linear_solver = args["linear-solver"],
-                             nodes_x = node_xs)
+                             nodes_x = node_xs,
+                             monotone = args["q-scalar"])
         end
     end
     cache_dir = joinpath(out_dir, "cache_main")
@@ -168,7 +186,7 @@ function setup_inverse(args)
                               frozen_mesh = args["adaptive-frozen"])
         println("ADAPTIVE backend: base=$(ab[1])x$(ab[2]) level=$(args["adaptive-level"]) preview=$(ap[1])x$(ap[2]) search=$(args["adaptive-search"]) frozen=$(args["adaptive-frozen"])")
     end
-    obj = make_objective(data, wells, cfg, layout; reg = args["reg"],
+    obj = make_objective(data, wells, cfg, layout; reg = reg_eff,
                          weight_ro = args["weight-ro"], cache_dir = cache_dir,
                          backend = args["adaptive-search"] ? :adaptive : :regular,
                          adaptive_cfg = acfg)
@@ -313,6 +331,7 @@ function mode_weight_ro_cal(ctx)
     data, wells, cfg, layout, cache_dir = ctx.data, ctx.wells, ctx.cfg, ctx.layout, ctx.cache_dir
     src = JSON.parsefile(args["theta0-file"])
     theta0 = Float64.(src["best"]["theta"])
+    args["q-scalar"] && (theta0 = collect(theta_to_delta(theta0)))
     ladder = parse.(Float64, split(args["weight-ro-cal"], ","))
     best = nothing; results = []
     for wr in ladder
@@ -337,6 +356,7 @@ function mode_theta0(ctx)
     layout = ctx.layout
     src = JSON.parsefile(args["theta0-file"])
     theta0 = Float64.(src["best"]["theta"])
+    args["q-scalar"] && (theta0 = collect(theta_to_delta(theta0)))
     if args["de-warm-start"]
         println("DE warm-start from $(args["theta0-file"]): J=$(src["best"]["J"]), budget $(args["de-budget"])")
         length(theta0) == length(layout) || error("theta0 dimension mismatch: $(length(theta0)) vs layout $(length(layout))")
@@ -472,13 +492,19 @@ function build_solution(ctx, best, results, ff, c2f_info, cde)
                             length(qe) == length(layout.epochs) ||
                                 error("--q-true: нужно одно значение на эпоху ($(length(layout.epochs)))")
                             OrderedDict("epoch_q_mwm2" => qe,
-                                        "theta" => collect(theta_constant(layout, qe)))
+                                        "theta" => args["q-scalar"] ?
+                                            collect(theta_to_delta(qe)) :
+                                            collect(theta_constant(layout, qe)))
                         end,
         "grid" => OrderedDict("nx" => nx, "nz" => nz,
                               "search_backend" => args["adaptive-search"] ? "adaptive" : "regular"),
         "layout" => OrderedDict("names" => layout.names, "nodes_x" => layout.nodes_x,
                                 "epochs" => [collect(e) for e in layout.epochs],
-                                "lower" => layout.lower, "upper" => layout.upper),
+                                "lower" => layout.lower, "upper" => layout.upper,
+                                "monotone_scalar" => args["q-scalar"],
+                                "delta" => args["q-scalar"] ?
+                                    collect(theta_to_delta([best.theta[ie] for ie in eachindex(layout.epochs)])) :
+                                    nothing),
         "settings" => merge(
             OrderedDict(k => args[k] for k in
                 ("ensemble", "workers", "de-budget", "nm-iterations", "sigma-T", "sigma-Ro",
@@ -581,9 +607,19 @@ function main()
         println(stderr, "ОШИБКА КОНФИГУРАЦИИ: ", sprint(showerror, err))
         exit(1)
     end
+    if args["q-scalar"] && args["c2f"]
+        error("--q-scalar не совместим с --c2f")
+    end
     ctx = setup_inverse(args)
     out = run_mode(ctx)
     best, results = out.best, out.results
+    if ctx.args["q-scalar"]
+        # optimisation ran in delta coordinates: unfold into real q for everything downstream
+        expand = ue -> collect(Float64.(theta_expand_mono(ctx.layout, ue)))
+        results = [InversionResult(expand(r.theta), r.J, r.J_T, r.J_Ro, r.J_reg,
+                                   r.de_evals, r.nm_evals, r.elapsed_s, r.seed) for r in results]
+        best = first(results)
+    end
     c2f_info = haskey(out, :c2f_stage) ? (out.c2f_stage, out.c2f_stages) : nothing
     cde = haskey(out, :cde) ? out.cde : 0
     obj = ctx.obj

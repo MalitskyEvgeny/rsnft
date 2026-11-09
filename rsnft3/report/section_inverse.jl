@@ -116,6 +116,19 @@ function _theta_section(io::IOBuffer, iv::InverseData)
 
     println(io, "<h3>Восстановленный поток q(x, t)</h3>")
     println(io, "<div class=\"grid2\">")
+    if get(layout, "monotone_scalar", false)
+        # скалярный режим: кривая q(t) вместо heatmap
+        mids = [(Float64(e[1]) + Float64(e[2])) / 2 for e in epochs]
+        qv = [theta[(ie - 1) * nxq + 1] for ie in 1:length(epochs)]
+        trace = Dict("type" => "scatter", "mode" => "lines+markers",
+                     "x" => mids, "y" => qv,
+                     "line" => Dict("shape" => "hvh", "color" => "#4684b8"),
+                     "hovertemplate" => "t: %{x:.1f} Ma<br>q: %{y:.1f} мВт/м²<extra></extra>")
+        plot_div(io, "inv-theta", trace,
+                 Dict("xaxis" => Dict("title" => "Время, Ma (от старой к молодой)", "autorange" => "reversed"),
+                      "yaxis" => Dict("title" => "q, мВт/м²")); height = 340, width = 555)
+        println(io, "<p><i>Скалярный режим: q боково-постоянный, монотонно не возрастающий ко времени (жёсткое ограничение).</i></p>")
+    else
     trace = Dict("type" => "heatmap", "z" => Q, "x" => nodes_x ./ 1000,
                  "y" => epoch_labels, "colorscale" => "Portland",
                  "colorbar" => Dict("title" => Dict("text" => "мВт/м²", "side" => "right")),
@@ -123,6 +136,7 @@ function _theta_section(io::IOBuffer, iv::InverseData)
     plot_div(io, "inv-theta", trace,
              Dict("xaxis" => Dict("title" => "X, км"),
                   "yaxis" => Dict("title" => "Эпоха")); height = 340, width = 555)
+    end
 
     rows = join(("<tr><td>" * esc(n) * "</td><td>" * fmt(theta[i]; d = 1) *
                  "</td><td>" * fmt(layout["lower"][i]; d = 0) *
@@ -404,6 +418,8 @@ function _theta_true_section(io::IOBuffer, iv::InverseData)
     epochs = layout["epochs"]
     nxq = length(nodes_km)
     th_true = Vector{Float64}(tt["theta"])
+    get(layout, "monotone_scalar", false) &&
+        (th_true = collect(Float64.(tt["epoch_q_mwm2"])))   # θ_true хранится в δ; показываем q
     th_hat = Vector{Float64}(sol["best"]["theta"])
     q_true = tt["epoch_q_mwm2"]
     println(io, "<h3>Twin: θ_true vs θ̂</h3>")

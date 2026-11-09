@@ -22,6 +22,14 @@
 param(
     [string]$RepoRoot      = "",
     [string]$JuliaExe      = "julia",
+
+# Требование версии: Manifest зафиксирован для Julia 1.13.0 (проверено на 1.13.0).
+$JuliaVerOut = & $JuliaExe --version 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $JuliaVerOut) { throw "Julia not found: '$JuliaExe'." }
+$JuliaVer = ("$JuliaVerOut" -replace '^julia version ', '').Trim()
+if ([version]$JuliaVer -lt [version]"1.13.0") {
+    throw ("Требуется Julia >= 1.13 (Manifest зафиксирован для 1.13.0); найдено: {0}" -f $JuliaVer)
+}
     [string]$DataDir       = "",
     [string]$Wells         = "",
     [ValidateSet("final","search")]

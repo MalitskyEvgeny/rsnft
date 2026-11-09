@@ -44,7 +44,9 @@ param(
     [string]$Theta0File    = "",
     [string]$Out           = "",
     [switch]$Force,
-    [switch]$OpenReport
+    [switch]$OpenReport,
+    [switch]$QScalar,
+    [switch]$NoQScalar
 )
 
 # UTF-8 консоль (кириллица в логах без '?????')
@@ -60,6 +62,14 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $R3 = Resolve-Path (Join-Path $ScriptDir "..")
 $RepoRoot = Resolve-Path (Join-Path $R3 "..")
 $JuliaExe = if ($env:JULIA) { $env:JULIA } else { "julia" }
+
+# Требование версии: Manifest зафиксирован для Julia 1.13.0 (проверено на 1.13.0).
+$JuliaVerOut = & $JuliaExe --version 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $JuliaVerOut) { throw "Julia not found: '$JuliaExe'." }
+$JuliaVer = ("$JuliaVerOut" -replace '^julia version ', '').Trim()
+if ([version]$JuliaVer -lt [version]"1.13.0") {
+    throw ("Требуется Julia >= 1.13 (Manifest зафиксирован для 1.13.0); найдено: {0}" -f $JuliaVer)
+}
 
 # "Данные_для_прямой_задачи" и "Данные для обратной задачи" посимвольно,
 # чтобы не зависеть от кодировки файла
@@ -92,12 +102,12 @@ if (-not $Out) { $Out = Join-Path $RepoRoot "results\report_full_$TS" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 if ($Uniform) {
-    Write-Host "=== Stage 1/3: forward solve (uniform): $(Split-Path -Leaf $DataDir), grid ${Nx}x${Nz} ==="
+    Write-Host "=== Stage 1/4: forward solve (uniform): $(Split-Path -Leaf $DataDir), grid ${Nx}x${Nz} ==="
     $SolverScript = Join-Path $R3 "basin_fvm.jl"
     $SolverArgs = @("--data-dir", $DataDir, "--cache-dir", (Join-Path $RepoRoot "results"),
                     "--nx", "$Nx", "--nz", "$Nz")
 } else {
-    Write-Host "=== Stage 1/3: forward solve (adaptive): $(Split-Path -Leaf $DataDir), base $Base, level $Level ==="
+    Write-Host "=== Stage 1/4: forward solve (adaptive): $(Split-Path -Leaf $DataDir), base $Base, level $Level ==="
     $SolverScript = Join-Path $R3 "adaptive_basin_fvm.jl"
     $SolverArgs = @("--data-dir", $DataDir, "--cache-dir", (Join-Path $RepoRoot "results"),
                     "--base-nx", ($Base -split ',')[0], "--base-nz", ($Base -split ',')[1],
@@ -120,7 +130,7 @@ if (-not $RunId) { throw "could not parse run id from: $($RunLine.ToString())" }
 $RunDir = Join-Path $RepoRoot "results\$RunId"
 Write-Host "run dir: $RunDir"
 
-Write-Host "=== Stage 2/3: inversion ==="
+Write-Host "=== Stage 2/4: inversion ==="
 $WellsForInverse = $Wells
 if ($Twin) {
     $TwinFile = Join-Path $Out "twin_grid.json"
@@ -145,15 +155,21 @@ if (-not $Uniform) {
 if ($NodeXs) { $InverseArgs += @("--node-xs", $NodeXs) }
 if ($Epochs) { $InverseArgs += @("--epochs", $Epochs) }
 if ($Twin) { $InverseArgs += @("--q-true", $Q) }
+if ($QScalar -or -not $NoQScalar) { $InverseArgs += @("--q-scalar") }
 if ($Theta0File) { $InverseArgs += @("--theta0-file", $Theta0File) }
 & $JuliaExe @InverseArgs
 if ($LASTEXITCODE -ne 0) { throw "run_inverse.jl failed" }
 
-Write-Host "=== Stage 3/3: report ==="
+Write-Host "=== Stage 3/4: report ==="
 & $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "report_full.jl") `
     --direct $RunDir --inverse (Join-Path $Out "inverse") --out (Join-Path $Out "report.html")
 if ($LASTEXITCODE -ne 0) { throw "report_full.jl failed" }
 
+Write-Host "=== Stage 4/4: xlsx export ==="
+& $JuliaExe "--project=$R3" "-t" "$Threads" (Join-Path $R3 "export_xlsx.jl") `
+    --run $RunDir --data-dir $DataDir `
+    --inverse (Join-Path $Out "inverse") --inv-data-dir $InvDataDir
+if ($LASTEXITCODE -ne 0) { throw "export_xlsx.jl failed" }
 Write-Host "=== summary ==="
 Write-Host "report   : $(Join-Path $Out 'report.html')"
 Write-Host "forward  : $RunDir"

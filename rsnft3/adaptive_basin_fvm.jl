@@ -608,11 +608,63 @@ function precompute_adaptive_geometry(data::BasinDataset, config::AdaptiveConfig
     return AdaptiveGeometry(config, mesh, state, grid, steps)
 end
 
+const HEAT_NODES_N = 33
+"""
+    heat_qbasal_default(data) -> (qbasal_by_age, nodes_x) | (nothing, nothing)
+
+Дефолтный нижний граничный поток для чистого прямого прогона: q [Вт/м²] на
+равномерных узлах профиля из Workbook heat (обычно Heat_Flow_Basal.xlsx) —
+эквивалент uniform-пути, где exact_state(with_heat=true) читает тот же
+Workbook через boundary_value. Медиана по слоям на возрастах с записью,
+линейная интерполяция по времени для возрастов без записи. (nothing, nothing),
+если heat пуст или не покрывает ages ни с одной стороны.
+"""
+function heat_qbasal_default(data::BasinDataset)
+    isempty(data.heat) && return (nothing, nothing)
+    xmin, xmax = Float64(data.bounds[1]), Float64(data.bounds[2])
+    nodes = collect(range(xmin, xmax; length = HEAT_NODES_N))
+    ages = sort!(collect(Set(Float64(a) for layer in values(data.heat) for a in keys(layer))))
+    q_at = Dict{Float64,Vector{Float64}}()
+    for age in ages
+        cand = Vector{Vector{Float64}}()
+        for layer in values(data.heat)
+            haskey(layer, age) || continue
+            push!(cand, interp1(nodes, layer[age].x, layer[age].value))
+        end
+        isempty(cand) && continue
+        q_at[age] = vec(median(reduce(hcat, cand); dims = 2)) .* 1.0e-3   # мВт/м² → Вт/м²
+    end
+    isempty(q_at) && return (nothing, nothing)
+    out = Dict{Float64,Vector{Float64}}()
+    for age in data.ages
+        if haskey(q_at, age)
+            out[age] = q_at[age]
+            continue
+        end
+        i_old = findlast(a -> a >= age && haskey(q_at, a), ages)
+        i_young = findfirst(a -> a <= age && haskey(q_at, a), ages)
+        if i_old === nothing && i_young === nothing
+            return (nothing, nothing)
+        elseif i_old === nothing
+            out[age] = q_at[ages[i_young]]
+        elseif i_young === nothing
+            out[age] = q_at[ages[i_old]]
+        else
+            a_old, a_young = ages[i_old], ages[i_young]
+            f = a_old == a_young ? 0.0 : (a_old - age) / (a_old - a_young)
+            out[age] = (1.0 - f) .* q_at[a_old] .+ f .* q_at[a_young]
+        end
+    end
+    return (out, nodes)
+end
 function run_adaptive(data::BasinDataset, config::AdaptiveConfig;
                       qbasal_by_age::Union{Nothing,Dict{Float64,Vector{Float64}}} = nothing,
                       qbasal_nodes_x::Union{Nothing,Vector{Float64}} = nothing,
                       geometry = nothing)
     validate(config)
+    if qbasal_by_age === nothing && qbasal_nodes_x === nothing && !isempty(data.heat)
+        qbasal_by_age, qbasal_nodes_x = heat_qbasal_default(data)
+    end
     ages = data.ages
     mesh = geometry === nothing ?
         build_mesh(data, config.frozen_mesh ? ages[end] : ages[1],
@@ -733,7 +785,7 @@ function adaptive_run_id(data::BasinDataset, config::AdaptiveConfig)
     payload = OrderedDict{String,Any}(            # ключи в алфавитном порядке (sort_keys=True)
         "adaptive" => adaptive,
         "input" => data.fingerprint,
-        "version" => 3,
+        "version" => 4,   # v4: run_adaptive по умолчанию читает q из Workbook heat (heat_qbasal_default)
     )
     return bytes2hex(sha256(JSON.json(payload)))[1:16]
 end
