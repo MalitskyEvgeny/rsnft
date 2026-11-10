@@ -88,19 +88,27 @@ function particle_ro(result, data, xq::Float64, layer_name::String, eta::Float64
     I_tot = zeros(length(EA_W))
     deposited = false
     for k in 2:nt
+        # Интервал учитывается, только если частица существует на его середине:
+        # до депонирования точка (zp по геометрии молодого конца) лежит в
+        # NaN-зоне над древней поверхностью осадков, и любой фолбэк тянет
+        # температуру из тёплого осадка ниже - ложное выдерживание, Ro завышена.
+        # Скорость при температуре дна пренебрежимо мала, потеря точности нет.
+        layer_at(data, 0.5 * (ages[k-1] + ages[k]), layer_name, xq) === nothing &&
+            (deposited && break; continue)
         lo_old = layer_at(data, ages[k-1], layer_name, xq)
         lo_young = layer_at(data, ages[k], layer_name, xq)
-        if lo_old === nothing && lo_young === nothing
-            deposited && break
-            continue
-        end
-        top_old, bot_old = lo_old === nothing ? lo_young : lo_old
-        top_young, bot_young = lo_young === nothing ? lo_old : lo_young
-        zp_old = top_old + eta * (bot_old - top_old)
+        top_young, bot_young = lo_young
         zp_young = top_young + eta * (bot_young - top_young)
-        v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
         v_young = bilinear_sample(xg, zg, temp[k, :, :], xq, zp_young)
-        (isfinite(v_old) && isfinite(v_young)) || (deposited && break; continue)
+        isfinite(v_young) || (deposited && break; continue)
+        if lo_old === nothing
+            v_old = v_young    # депонирование в первой половине интервала
+        else
+            top_old, bot_old = lo_old
+            zp_old = top_old + eta * (bot_old - top_old)
+            v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
+            isfinite(v_old) || (deposited && break; continue)
+        end
         TK_old = v_old + 273.15
         TK_young = v_young + 273.15
         if max(TK_old, TK_young) < t_min_k

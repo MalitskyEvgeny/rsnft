@@ -23,20 +23,23 @@ function particle_ro_at(result, data, xq, layer_name, eta, t_stop; t_min_k=200.0
     for k in 2:nt
         age_mid = 0.5 * (ages[k-1] + ages[k])
         age_mid < t_stop - 1e-9 && (deposited && break; continue)
+        # гейт депонирования и трапеция - синхронно с ro_kinetics.particle_ro
+        layer_at(data, 0.5 * (ages[k-1] + ages[k]), layer_name, xq) === nothing &&
+            (deposited && break; continue)
         lo_old = layer_at(data, ages[k-1], layer_name, xq)
         lo_young = layer_at(data, ages[k], layer_name, xq)
-        if lo_old === nothing && lo_young === nothing
-            deposited && break
-            continue
-        end
-        top_old, bot_old = lo_old === nothing ? lo_young : lo_old
-        top_young, bot_young = lo_young === nothing ? lo_old : lo_young
-        zp_old = top_old + eta * (bot_old - top_old)
+        top_young, bot_young = lo_young
         zp_young = top_young + eta * (bot_young - top_young)
-        # трапеция по скорости + bilinear_sample (синхронно с ro_kinetics.particle_ro)
-        v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
         v_young = bilinear_sample(xg, zg, temp[k, :, :], xq, zp_young)
-        (isfinite(v_old) && isfinite(v_young)) || (deposited && break; continue)
+        isfinite(v_young) || (deposited && break; continue)
+        if lo_old === nothing
+            v_old = v_young
+        else
+            top_old, bot_old = lo_old
+            zp_old = top_old + eta * (bot_old - top_old)
+            v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
+            isfinite(v_old) || (deposited && break; continue)
+        end
         TK_old = v_old + 273.15
         TK_young = v_young + 273.15
         if max(TK_old, TK_young) < t_min_k
