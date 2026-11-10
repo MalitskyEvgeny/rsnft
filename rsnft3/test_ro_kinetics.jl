@@ -54,6 +54,60 @@ check("Ro monotone in T", ro_isothermal(80.0, 50.0) < ro_isothermal(110.0, 50.0)
 check("Ro monotone in time", ro_isothermal(120.0, 10.0) < ro_isothermal(120.0, 100.0))
 check("Ro(0C, any) == easy_ro(0) == 0.202", abs(easy_ro(0.0) - exp(-1.6)) < 1e-12)
 
+# --- 4. Квадратура particle_ro: трапеция по скорости на синтетическом прогоне ---
+# Фейки: layer_at требует data.ages и data.depth[name][age]::Record; result —
+# NamedTuple с temperature_c (nt, nz, nx), x, z, ages_ma.
+let
+    rec_old = Record([0.0, 1000.0], [0.0, 0.0], [100.0, 100.0], [0.0, 0.0])
+    rec_young = Record([0.0, 1000.0], [0.0, 0.0], [100.0, 100.0], [0.0, 0.0])
+    fake_data = (ages = [10.0, 0.0],
+                 depth = Dict("L" => Dict(10.0 => rec_old, 0.0 => rec_young)))
+    xg = [0.0, 1000.0]
+    zg = collect(range(0.0, 100.0; length = 11))
+    function fake_result(T_old_c, T_young_c)
+        T = zeros(2, length(zg), length(xg))
+        T[1, :, :] .= T_old_c
+        T[2, :, :] .= T_young_c
+        (temperature_c = T, x = xg, z = zg, ages_ma = [10.0, 0.0])
+    end
+    xq, eta = 500.0, 0.5
+
+    # (а) изотермический случай: трапеция == точному изотермическому значению
+    ro_iso = particle_ro(fake_result(100.0, 100.0), fake_data, xq, "L", eta)
+    check("particle_ro isothermal == exact", abs(ro_iso - ro_isothermal(100.0, 10.0)) < 1e-12)
+
+    # (б) линейный разогрев 70->110C за 10 Myr: трапеция заметно ближе к эталону
+    #     мелкого шага, чем старая константа на горячем конце
+    ro_trap = particle_ro(fake_result(70.0, 110.0), fake_data, xq, "L", eta)
+    function ro_fine_linear(T0, T1, Myr; n = 4000)
+        dt = Myr * SECONDS_PER_MA / n
+        I = zeros(length(EA_W))
+        for i in 0:(n - 1)
+            TK = (T0 + (T1 - T0) * (i + 0.5) / n) + 273.15
+            I .+= isothermal_rate(TK) .* dt
+        end
+        F = sum(EA_W[m] * (1 - exp(-I[m])) for m in eachindex(I))
+        easy_ro(min(F, 1.0))
+    end
+    ro_fine = ro_fine_linear(70.0, 110.0, 10.0)
+    dt_tot = 10.0 * SECONDS_PER_MA
+    I_hot = isothermal_rate(110.0 + 273.15) .* dt_tot
+    F_hot = sum(EA_W[m] * (1 - exp(-I_hot[m])) for m in eachindex(I_hot))
+    ro_hot = easy_ro(min(F_hot, 1.0))
+    check("particle_ro heating: closer to fine grid than hot-end constant",
+          abs(ro_trap - ro_fine) < abs(ro_hot - ro_fine))
+    # k(T) сильно выпукла: трапеция на 2 точках всё же завышает, но вдвое меньше
+    check("particle_ro heating: error < 3/4 of hot-end error",
+          abs(ro_trap - ro_fine) < 0.75 * abs(ro_hot - ro_fine))
+
+    # (в) регресс: новая Ro не превышает старую (смещение было в плюс)
+    check("particle_ro heating: Ro <= old hot-end Ro", ro_trap <= ro_hot + 1e-12)
+
+    # холодный интервал (оба конца ниже t_min_k=200K, т.е. < -73C): вклада нет
+    ro_cold = particle_ro(fake_result(-100.0, -100.0), fake_data, xq, "L", eta)
+    check("particle_ro cold interval: no contribution", abs(ro_cold - easy_ro(0.0)) < 1e-12)
+end
+
 println()
 if failures == 0
     println("ALL PASS")

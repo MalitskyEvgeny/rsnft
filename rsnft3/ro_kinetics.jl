@@ -11,7 +11,8 @@
 # База: research/proto/ro_calc.jl; ловушки учтены (ro_kinetics.md §6):
 #   1) геометрия слоя на промежуточных возрастах — линейная интерполяция срезов;
 #   2) интеграл кумулятивный (не пошаговый (1−e^−ΔI));
-#   3) NaN-зоны T вне бассейна — клэмп к ближайшему конечному по z.
+#   3) NaN-зоны T вне бассейна — масочная билинейная интерполяция с 1D-фолбэком
+#      по ближайшей конечной строке/столбцу (bilinear_sample_flagged, basin_fvm.jl).
 #
 # Запуск автономно не предполагается — include из objective.jl / run_inverse.jl.
 
@@ -70,47 +71,48 @@ end
 # Ro частиц
 # ----------------------------------------------------------------------------
 
-"Ro для частицы (x, слой, η) по полю temperature_c прогона (nt, nz, nx)."
+"Ro для частицы (x, слой, η) по полю temperature_c прогона (nt, nz, nx).
+
+Квадратура — трапеция по скорости на каждом интервале срезов [k-1, k]: константа
+на горячем (молодом) конце интервала систематически завышала интеграл Аррениуса
+(k(T) растёт экспоненциально, интервалы срезов 12.5–20 Ma) — Ro уползала вправо.
+T на обоих концах — bilinear_sample (масочная интерполяция с честным 1D-фолбэком
+по ближайшей конечной строке/столбцу; прежний фолбэк к ближайшему узлу предпочёл
+бы более горячий узел ниже частицы)."
 function particle_ro(result, data, xq::Float64, layer_name::String, eta::Float64;
                      t_min_k::Float64 = 200.0)
     temp = result.temperature_c
-    nt, nz, nx = size(temp)
+    nt = size(temp, 1)
     xg, zg, ages = result.x, result.z, result.ages_ma
-    dxg = xg[2] - xg[1]
-    dzg = zg[2] - zg[1]
 
     I_tot = zeros(length(EA_W))
     deposited = false
     for k in 2:nt
-        age_mid = 0.5 * (ages[k-1] + ages[k])
-        lo = layer_at(data, age_mid, layer_name, xq)
-        lo === nothing && (deposited && break; continue)
-        top, bot = lo
-        zp = top + eta * (bot - top)
-        # 5.3: билинейная выборка T (согласовано с T-остатками objective) с
-        # фолбэком к ближайшему конечному узлу при NaN-стенсиле
-        v = bilinear_sample(xg, zg, temp[k, :, :], xq, zp)
-        if isnan(v)
-            xi = clamp(round(Int, (xq - xg[1]) / dxg) + 1, 1, nx)
-            zi = clamp(round(Int, (zp - zg[1]) / dzg) + 1, 1, nz)
-            for d in 1:nz
-                if zi + d <= nz && isfinite(temp[k, zi+d, xi])
-                    v = temp[k, zi+d, xi]; break
-                elseif zi - d >= 1 && isfinite(temp[k, zi-d, xi])
-                    v = temp[k, zi-d, xi]; break
-                end
-            end
+        lo_old = layer_at(data, ages[k-1], layer_name, xq)
+        lo_young = layer_at(data, ages[k], layer_name, xq)
+        if lo_old === nothing && lo_young === nothing
+            deposited && break
+            continue
         end
-        TK = v + 273.15
-        if TK < t_min_k
+        top_old, bot_old = lo_old === nothing ? lo_young : lo_old
+        top_young, bot_young = lo_young === nothing ? lo_old : lo_young
+        zp_old = top_old + eta * (bot_old - top_old)
+        zp_young = top_young + eta * (bot_young - top_young)
+        v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
+        v_young = bilinear_sample(xg, zg, temp[k, :, :], xq, zp_young)
+        (isfinite(v_old) && isfinite(v_young)) || (deposited && break; continue)
+        TK_old = v_old + 273.15
+        TK_young = v_young + 273.15
+        if max(TK_old, TK_young) < t_min_k
             deposited = true
             continue
         end
         dt = (ages[k-1] - ages[k]) * SECONDS_PER_MA
         dt <= 0.0 && continue
-        rate = isothermal_rate(TK)
+        rate_old = isothermal_rate(TK_old)
+        rate_young = isothermal_rate(TK_young)
         for n in eachindex(I_tot)
-            I_tot[n] += rate[n] * dt
+            I_tot[n] += 0.5 * (rate_old[n] + rate_young[n]) * dt
         end
         deposited = true
     end

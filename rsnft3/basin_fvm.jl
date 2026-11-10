@@ -1184,6 +1184,46 @@ function run_forward(data::BasinDataset, config::SolverConfig;
 end
 
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Билинейная выборка поля на произвольной точке (T-остатки, Ro-частицы)
+# ----------------------------------------------------------------------------
+
+const BILINEAR_DEN_RATIO = 0.25
+
+"""Билинейная выборка с флагом вырождения: возвращает (значение, degenerate)."""
+function bilinear_sample_flagged(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
+                                 x::Float64, z::Float64)
+    nx, nz = length(xg), length(zg)
+    ux = (x - xg[1]) / (xg[2] - xg[1])
+    uz = (z - zg[1]) / (zg[2] - zg[1])
+    i0 = clamp(floor(Int, ux) + 1, 1, nx); i1 = clamp(i0 + 1, 1, nx)
+    j0 = clamp(floor(Int, uz) + 1, 1, nz); j1 = clamp(j0 + 1, 1, nz)
+    tx = clamp(ux - (i0 - 1), 0.0, 1.0); tz = clamp(uz - (j0 - 1), 0.0, 1.0)
+    v00 = field[j0, i0]; v10 = field[j0, i1]; v01 = field[j1, i0]; v11 = field[j1, i1]
+    # Масочная интерполяция: неактивные (NaN) углы исключаются с перенормировкой
+    # весов - точки у края сетки / тонкого осадочного клина не выпадают в NaN.
+    num = 0.0; den = 0.0; wtot = 0.0
+    for (v, w) in ((v00, (1-tx)*(1-tz)), (v10, tx*(1-tz)), (v01, (1-tx)*tz), (v11, tx*tz))
+        wtot += w
+        isfinite(v) || continue
+        num += w * v; den += w
+    end
+    # Вырожденная перенормировка: если конечные углы несут малую долю полной
+    # суммы весов, линейная комбинация не представима. Тогда фолбэк - 1D
+    # интерполяция по ближайшей строке/столбцу, где есть конечные углы
+    # (точка наблюдения на поверхности осадочной толщи: слой выше - NaN,
+    # честное значение даёт первая активная строка ниже).
+    den >= BILINEAR_DEN_RATIO * wtot && return (num / den, false)
+    for (a, b, t) in ((v01, v11, tx), (v00, v10, tx), (v10, v11, tz), (v00, v01, tz))
+        if isfinite(a) && isfinite(b)
+            return (a + t * (b - a), false)
+        end
+    end
+    return (NaN, true)
+end
+bilinear_sample(xg::AbstractVector, zg::AbstractVector, field::AbstractMatrix,
+                x::Float64, z::Float64) = bilinear_sample_flagged(xg, zg, field, x, z)[1]
+
 # Кэш результатов
 # ----------------------------------------------------------------------------
 

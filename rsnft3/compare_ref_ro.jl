@@ -16,41 +16,39 @@ end
 
 function particle_ro_at(result, data, xq, layer_name, eta, t_stop; t_min_k=200.0)
     temp = result.temperature_c
-    nt, nz, nx = size(temp)
+    nt = size(temp, 1)
     xg, zg, ages = result.x, result.z, result.ages_ma
-    dxg = xg[2] - xg[1]
-    dzg = zg[2] - zg[1]
     I_tot = zeros(length(EA_W))
     deposited = false
     for k in 2:nt
         age_mid = 0.5 * (ages[k-1] + ages[k])
         age_mid < t_stop - 1e-9 && (deposited && break; continue)
-        lo = layer_at(data, age_mid, layer_name, xq)
-        lo === nothing && (deposited && break; continue)
-        top, bot = lo
-        zp = top + eta * (bot - top)
-        xi = clamp(round(Int, (xq - xg[1]) / dxg) + 1, 1, nx)
-        zi = clamp(round(Int, (zp - zg[1]) / dzg) + 1, 1, nz)
-        v = temp[k, zi, xi]
-        if isnan(v)
-            for d in 1:nz
-                if zi + d <= nz && isfinite(temp[k, zi+d, xi])
-                    v = temp[k, zi+d, xi]; break
-                elseif zi - d >= 1 && isfinite(temp[k, zi-d, xi])
-                    v = temp[k, zi-d, xi]; break
-                end
-            end
+        lo_old = layer_at(data, ages[k-1], layer_name, xq)
+        lo_young = layer_at(data, ages[k], layer_name, xq)
+        if lo_old === nothing && lo_young === nothing
+            deposited && break
+            continue
         end
-        TK = v + 273.15
-        if TK < t_min_k
+        top_old, bot_old = lo_old === nothing ? lo_young : lo_old
+        top_young, bot_young = lo_young === nothing ? lo_old : lo_young
+        zp_old = top_old + eta * (bot_old - top_old)
+        zp_young = top_young + eta * (bot_young - top_young)
+        # трапеция по скорости + bilinear_sample (синхронно с ro_kinetics.particle_ro)
+        v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
+        v_young = bilinear_sample(xg, zg, temp[k, :, :], xq, zp_young)
+        (isfinite(v_old) && isfinite(v_young)) || (deposited && break; continue)
+        TK_old = v_old + 273.15
+        TK_young = v_young + 273.15
+        if max(TK_old, TK_young) < t_min_k
             deposited = true
             continue
         end
         dt = (ages[k-1] - ages[k]) * SECONDS_PER_MA
         dt <= 0.0 && continue
-        rate = isothermal_rate(TK)
+        rate_old = isothermal_rate(TK_old)
+        rate_young = isothermal_rate(TK_young)
         for n in eachindex(I_tot)
-            I_tot[n] += rate[n] * dt
+            I_tot[n] += 0.5 * (rate_old[n] + rate_young[n]) * dt
         end
         deposited = true
     end
