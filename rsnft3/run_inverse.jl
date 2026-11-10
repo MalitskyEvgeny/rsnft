@@ -143,6 +143,9 @@ function setup_inverse(args)
     # воркеры: каждый со своим датасетом и кэшем
     if args["workers"] > 1 && nprocs() == 1
         addprocs(args["workers"] - 1)
+        # страховка: воркеры умирают и на error-путях exit(1) (atexit-хендлеры
+        # выполняются при exit()); основной путь — finally вокруг main()
+        atexit(shutdown_workers!)
         # Julia 1.12+ strict world age: @everywhere include(...) с интерполяцией
         # из тела функции сериализует замыкание, которое на воркере не
         # десериализуется (UndefVarError в последующих remotecall).
@@ -594,6 +597,28 @@ function print_summary(ctx, best, results, rep)
     end
 end
 
+"Гарантированное завершение Distributed-воркеров: rmprocs с таймаутом,
+при зависании — жёсткий kill процесса. Идемпотентна: без воркеров — no-op."
+function shutdown_workers!()
+    ws = workers()
+    isempty(ws) && return 0
+    n = length(ws)
+    try
+        rmprocs(ws...; waitfor = 10)
+    catch err
+        @warn "rmprocs не завершил воркеров штатно, выполняется kill" err
+    end
+    for w in workers()
+        try
+            kill(Distributed.worker_from_id(w).remote)
+        catch
+            # воркер уже мёртв
+        end
+    end
+    println("workers shut down ($n)")
+    return n
+end
+
 function main()
     args = parse_cli()
     Progress.init()
@@ -638,5 +663,9 @@ catch err
     showerror(stderr, err)
     println(stderr)
     exit(1)
+finally
+    # основной путь очистки: воркеры умирают и при исключении, и при
+    # нормальном завершении; exit(1) внутри catch уже покрыт atexit
+    shutdown_workers!()
 end
 
