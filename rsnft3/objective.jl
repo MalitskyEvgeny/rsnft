@@ -227,8 +227,14 @@ function cache_save(obj::Objective; force::Bool = false)
     open(tmp, "w") do f
         JSON.print(f, OrderedDict(k => json_safe(v) for (k, v) in obj.cache))
     end
-    mv(tmp, obj.cache_path; force = true)      # атомарно на практике
-    obj._dirty[] = 0
+    # Windows: антивирус может кратковременно держать целевой файл — EACCES на
+    # перезаписи. Кэш — только оптимизация: тихо пропускаем запись, переживём.
+    try
+        mv(tmp, obj.cache_path; force = true)  # атомарно на практике
+        obj._dirty[] = 0
+    catch
+        rm(tmp; force = true)
+    end
 end
 
 "Оценка J: прогон прямой задачи, выборка T/Ro, регуляризация. Возвращает (J, info).
