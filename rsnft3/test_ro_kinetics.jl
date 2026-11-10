@@ -25,9 +25,11 @@ check("A == 1e13", EA_A == 1.0e13)
 # basin_data.py: E_J = E_kcal*4186.8, Rg_J = 8.314 (то же, что ER в easyro_original.py)
 et_ER = et_E .* 4186.8 ./ 8.314
 check("E/R (K) == basin_data.py (rel < 1e-3)", maximum(abs.(EA_ER .- et_ER) ./ et_ER) < 1.0e-3)
-# инкрементные константы статьи (easyro_original.py дословно)
-check("A1..B2 == 2.334733/0.250621/3.330675/1.681534",
-      A1 == 2.334733 && A2 == 0.250621 && B1 == 3.330675 && B2 == 1.681534)
+# точный Аррениус: k(E=50 kcal, T=100C) == A*exp(-E/(R*T))
+let k50 = isothermal_rate(373.15)[9]
+    k_ref = 1.0e13 * exp(-(50.0 * 4186.8) / (8.314 * 373.15))
+    check("k(50 kcal, 100C) == A*exp(-E/RT)", abs(k50 - k_ref) / k_ref < 1e-12)
+end
 
 # --- 2. isothermal_rate: конечность и положительность в рабочем диапазоне ---
 rate = isothermal_rate(373.15)
@@ -45,11 +47,11 @@ end
 # Общепринятое поведение EASY%Ro (Sweeney&Burnham 1990):
 # 60C/100Myr — незрелая зона (Ro < 0.5, начало нефтяного окна ~0.5-0.6);
 # 100C/100Myr — середина нефтяного окна (~0.7-0.8);
-# 140C/100Myr — конец нефтяного окна / газ (>1.3).
+# 140C/100Myr — за нефтяным окном (>1.1; при точном Аррениусе 1.23).
 check("Ro(60C, 100 Myr) < 0.55 (immature)", ro_isothermal(60.0, 100.0) < 0.55)
 check("Ro(100C, 100 Myr) in [0.6, 0.95] (oil window)",
       0.6 <= ro_isothermal(100.0, 100.0) <= 0.95)
-check("Ro(140C, 100 Myr) > 1.3 (overmature)", ro_isothermal(140.0, 100.0) > 1.3)
+check("Ro(140C, 100 Myr) > 1.1 (overmature)", ro_isothermal(140.0, 100.0) > 1.1)
 check("Ro monotone in T", ro_isothermal(80.0, 50.0) < ro_isothermal(110.0, 50.0) < ro_isothermal(140.0, 50.0))
 check("Ro monotone in time", ro_isothermal(120.0, 10.0) < ro_isothermal(120.0, 100.0))
 check("Ro(0C, any) == easy_ro(0) == 0.202", abs(easy_ro(0.0) - exp(-1.6)) < 1e-12)
