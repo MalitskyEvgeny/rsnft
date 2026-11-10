@@ -31,14 +31,17 @@ function particle_ro_at(result, data, xq, layer_name, eta, t_stop; t_min_k=200.0
         top_young, bot_young = lo_young
         zp_young = top_young + eta * (bot_young - top_young)
         v_young = bilinear_sample(xg, zg, temp[k, :, :], xq, zp_young)
-        isfinite(v_young) || (deposited && break; continue)
+        # NaN-выборка T (точка на границе активной зоны сетки) — пропуск интервала,
+        # не обрыв интегрирования: частица существует, терять весь дальнейший
+        # прогрев неверно (подошвенные точки Layer_7, 55-0 Ma).
+        isfinite(v_young) || continue
         if lo_old === nothing
             v_old = v_young
         else
             top_old, bot_old = lo_old
             zp_old = top_old + eta * (bot_old - top_old)
             v_old = bilinear_sample(xg, zg, temp[k-1, :, :], xq, zp_old)
-            isfinite(v_old) || (deposited && break; continue)
+            isfinite(v_old) || continue
         end
         TK_old = v_old + 273.15
         TK_young = v_young + 273.15
